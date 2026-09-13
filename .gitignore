@@ -5,3 +5,11 @@ coverage/
 .DS_Store
 Thumbs.db
 .vitest-tmp/
+
+*.tgz
+*.edit-tmp
+*.db
+*.db-*
+.env
+.env.*
+*.omds-*

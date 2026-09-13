@@ -1,3 +1,11 @@
+# Multidevice Sync changelog
+
+## 0.1.0 - early preview
+
+Independent fork of upstream 3.0.1. Non-destructive batch import, canonical exports, local project preservation, verified backups, guarded restore, content-baseline conflicts, path mappings, isolated dry-run and doctor. See docs/SAFETY.md and docs/ROADMAP.md for limits.
+
+## Upstream history
+
 # Changelog
 
 ## 3.0.1

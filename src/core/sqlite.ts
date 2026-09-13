@@ -88,6 +88,7 @@ export async function openDatabase(
   if (driver === "bun") {
     const { Database } = await importBunSqlite();
     const db = new Database(file, options.readOnly ? { readonly: true } : { create: true });
+    db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     return {
       prepare: (sql: string) => {
         const stmt = db.prepare(sql);
@@ -104,6 +105,7 @@ export async function openDatabase(
   if (driver === "node") {
     const { DatabaseSync } = (await import("node:sqlite")) as any;
     const db = new DatabaseSync(file, options.readOnly ? { readOnly: true } : {});
+    db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     return {
       prepare: (sql: string) => {
         const stmt = db.prepare(sql);

@@ -8,9 +8,11 @@ import {
   parsePorcelainPaths,
   toGitError,
 } from "./git.js";
+import { assertPrivateRemote, assertSafeTrackedFiles, createConfigBackup } from "./guard.js";
 import { commitMessage, hostAlias } from "./host.js";
 import { applyOverrides, configMatchesRepo, findConfigFile } from "./overrides.js";
 import { type Roots, getDatabasePath, getRoots } from "./paths.js";
+import { previewSync } from "./preview.js";
 import {
   LOCAL_RUNTIME_PATHS,
   assertPushLanded,
@@ -29,7 +31,7 @@ import {
   summarize,
   totalChanges,
 } from "./reporter.js";
-import { exportSessions, importSessions } from "./sessions.js";
+import { acknowledgeExport, exportSessions, importSessions } from "./sessions.js";
 import { type Settings, loadSettings, repoBranch, repoUrl } from "./settings.js";
 import { sqliteAvailable } from "./sqlite.js";
 import {
@@ -55,7 +57,13 @@ export interface SyncResult {
   changed: boolean;
   summary: ReturnType<typeof emptySummary>;
   files: ChangedFile[];
-  sessions?: { exported?: number; imported?: number; skipped?: number };
+  sessions?: {
+    exported?: number;
+    imported?: number;
+    skipped?: number;
+    conflicts?: number;
+    backup?: string;
+  };
   message: string;
   /** True when OpenCode must restart for the pulled config to take effect. */
   restartRequired: boolean;
@@ -86,7 +94,7 @@ function prepare(options: SyncOptions): Context {
   if (!remote) {
     throw new SyncError(
       "No sync repository configured.\n" +
-        "Run `opencode-sync init` to create one, or `opencode-sync link <owner/repo>` to use an existing one.",
+        "Run `omds init` to create one, or `omds link <owner/repo>` to use an existing one.",
     );
   }
   return {
@@ -110,6 +118,10 @@ function toChangedFiles(result: GitResult, excludeRuntime: boolean): ChangedFile
 // ── Push ────────────────────────────────────────────────────────────────────
 
 export async function push(options: SyncOptions = {}): Promise<SyncResult> {
+  if (options.dryRun) return previewSync("push", options, pushImpl);
+  return pushImpl(options);
+}
+async function pushImpl(options: SyncOptions): Promise<SyncResult> {
   const ctx = prepare(options);
   const { root, branch, reporter } = ctx;
 
@@ -117,10 +129,17 @@ export async function push(options: SyncOptions = {}): Promise<SyncResult> {
 
   ensureRepo({ root, remote: ctx.remote, branch });
   assertRemoteReachable(root, branch, "Push", true);
+  assertPrivateRemote(ctx.remote, ctx.settings);
+  const fetched = git(["fetch", "origin", branch], { cwd: root });
+  if (fetched.ok && !ctx.force && countCommits(root, `HEAD..origin/${branch}`) > 0)
+    throw new SyncError("Remote changed: pull first before exporting local sessions");
   writeRepoMetadata(root);
 
   try {
-    return await runPush(ctx);
+    const result = await runPush(ctx);
+    if (!ctx.dryRun && ctx.settings.sessions.enabled)
+      await acknowledgeExport(getDatabasePath(ctx.roots), root, ctx.settings.sessions.pathMappings);
+    return result;
   } finally {
     // Staging rewrites the on-disk config into its shareable form. Whatever
     // happens next — success, conflict, network failure — this machine must be
@@ -140,6 +159,7 @@ async function runPush(ctx: Context): Promise<SyncResult> {
   git(["add", "-A"], { cwd: root });
   unstageLocalRuntimePaths(root);
 
+  assertSafeTrackedFiles(root, ctx.settings);
   const staged = git(["diff", "--cached", "--name-status"], { cwd: root });
   const files = toChangedFiles(staged, true);
   const summary = summarize(files);
@@ -218,7 +238,7 @@ function pushBranch(ctx: Context, alreadyCommitted: boolean): void {
     git(["rebase", "--abort"], { cwd: root });
     throw new SyncError(
       "The remote has changes that conflict with this machine.\n" +
-        "Run `opencode-sync pull` to take the remote version, or `opencode-sync push --force` to overwrite it.",
+        "Run `omds pull` to take the remote version, or `omds push --force` to overwrite it.",
     );
   }
 
@@ -231,10 +251,24 @@ function pushBranch(ctx: Context, alreadyCommitted: boolean): void {
 // ── Pull ────────────────────────────────────────────────────────────────────
 
 export async function pull(options: SyncOptions = {}): Promise<SyncResult> {
+  if (options.dryRun) return previewSync("pull", options, pullImpl);
+  return pullImpl(options);
+}
+async function pullImpl(options: SyncOptions): Promise<SyncResult> {
+  const ctx = prepare(options);
+  assertPrivateRemote(ctx.remote, ctx.settings);
+  try {
+    return await pullInternal(options);
+  } finally {
+    applyOverrides(ctx.roots.config);
+  }
+}
+async function pullInternal(options: SyncOptions): Promise<SyncResult> {
   const ctx = prepare(options);
   const { root, branch, reporter, force } = ctx;
 
   fs.mkdirSync(root, { recursive: true });
+  createConfigBackup(root, ctx.roots.data);
 
   if (!isGitRepo(root)) {
     const state = ensureRepo({ root, remote: ctx.remote, branch });
@@ -272,7 +306,7 @@ export async function pull(options: SyncOptions = {}): Promise<SyncResult> {
   if (!force && ahead > 0) {
     throw new SyncError(
       `This machine has ${ahead} commit(s) that were never pushed.\n` +
-        "Run `opencode-sync push` first, or `opencode-sync pull --force` to discard them.",
+        "Run `omds push` first, or `omds pull --force` to discard them.",
     );
   }
 
@@ -280,7 +314,16 @@ export async function pull(options: SyncOptions = {}): Promise<SyncResult> {
   if (!force && behind === 0) {
     // Nothing incoming, so the worktree does not need to be touched at all.
     // Skipping the stash cycle here is what keeps a no-op pull fast on Windows.
-    return done("pull", false, emptySummary(), [], "Already up to date", undefined, false);
+    const sessions = await maybeImportSessions(ctx);
+    return done(
+      "pull",
+      Boolean(sessions?.imported),
+      emptySummary(),
+      [],
+      "Already up to date",
+      sessions,
+      Boolean(sessions?.imported),
+    );
   }
 
   const stageCtx = createStageContext(root, ctx.settings, reporter, force, ctx.roots);
@@ -378,7 +421,7 @@ function prepareWorktree(ctx: Context): boolean {
       "push",
       "--include-untracked",
       "-m",
-      "opencode-sync auto-stash",
+      "omds auto-stash",
       "--",
       ".",
       ...excludePathspecs(),
@@ -422,6 +465,10 @@ async function maybeExportSessions(ctx: Context): Promise<SyncResult["sessions"]
   const database = getDatabasePath(ctx.roots);
   ctx.reporter.step("Exporting sessions");
   const result = await exportSessions(database, ctx.root, ctx.settings.sessions, ctx.reporter);
+  if (result.conflicts?.length)
+    throw new SyncError(
+      `Session export conflicts: ${result.conflicts.join(", ")}. No push was performed.`,
+    );
 
   for (const skipped of result.skippedTooLarge) {
     ctx.reporter.warn(
@@ -445,12 +492,26 @@ async function maybeImportSessions(ctx: Context): Promise<SyncResult["sessions"]
   }
 
   ctx.reporter.step("Importing sessions");
-  const result = await importSessions(getDatabasePath(ctx.roots), ctx.root, ctx.reporter);
+  const result = await importSessions(
+    getDatabasePath(ctx.roots),
+    ctx.root,
+    ctx.reporter,
+    ctx.settings.sessions,
+  );
   for (const failure of result.failed) {
     ctx.reporter.warn(`Could not import ${failure.file}: ${failure.reason}`);
   }
+  if (result.failed.length || result.conflicts.length)
+    throw new SyncError(
+      `Session import stopped: ${result.failed.map((f) => f.reason).join("; ")} ${result.conflicts.map((c) => c.sessionId + ": " + c.reason).join("; ")}`,
+    );
   if (result.imported > 0) ctx.reporter.detail(`Imported ${result.imported} session(s)`);
-  return { imported: result.imported, skipped: result.skippedOlder };
+  return {
+    imported: result.imported,
+    skipped: result.skippedOlder,
+    conflicts: result.conflicts.length,
+    backup: result.backup,
+  };
 }
 
 // ── Status ──────────────────────────────────────────────────────────────────
@@ -495,7 +556,8 @@ export function status(options: SyncOptions = {}): StatusResult {
   if (!remote || !isGitRepo(root)) return base;
   base.initialized = true;
 
-  git(["fetch", "origin", branch], { cwd: root });
+  const fetched = git(["fetch", "origin", branch], { cwd: root });
+  if (!fetched.ok) throw toGitError("Status fetch", fetched);
   base.ahead = countCommits(root, `origin/${branch}..HEAD`);
   base.behind = countCommits(root, `HEAD..origin/${branch}`);
 

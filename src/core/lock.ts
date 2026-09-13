@@ -120,7 +120,9 @@ export async function withSyncLock<T>(
 ): Promise<T> {
   const lock = acquireSyncLock(configRoot, options);
   if (!lock) {
-    throw new Error("Another opencode-sync operation is already running. Wait for it to finish.");
+    throw new Error(
+      "Another opencode-multidevice-sync operation is already running. Wait for it to finish.",
+    );
   }
   try {
     return await fn();

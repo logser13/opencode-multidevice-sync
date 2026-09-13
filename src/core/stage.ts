@@ -48,6 +48,7 @@ const DATA_FILES = ["sync-state.json"];
 const DATA_PATHS = ["storage/project", "storage/migration"];
 /** State files that describe this machine's current UI, not its configuration. */
 const MACHINE_STATE_FILES = new Set(["session.json"]);
+const MACHINE_STATE_DIRS = new Set(["locks"]);
 
 const SKILL_LOCK = ".skill-lock.json";
 
@@ -97,7 +98,10 @@ export function stageIn(ctx: StageContext): void {
   if (settings.includeState) {
     if (fs.existsSync(roots.state)) {
       removeRecursive(repoState);
-      copyDirRecursive(roots.state, repoState, { excludeFiles: MACHINE_STATE_FILES });
+      copyDirRecursive(roots.state, repoState, {
+        excludeFiles: MACHINE_STATE_FILES,
+        excludeDirs: MACHINE_STATE_DIRS,
+      });
     } else {
       removeRecursive(repoState);
     }
@@ -240,7 +244,10 @@ export function stageOut(ctx: StageContext): void {
   }
 
   if (settings.includeState && fs.existsSync(repoState)) {
-    replaceDirAtomically(repoState, roots.state, { preserveRootFiles: MACHINE_STATE_FILES });
+    replaceDirAtomically(repoState, roots.state, {
+      preserveRootFiles: MACHINE_STATE_FILES,
+      excludeDirs: MACHINE_STATE_DIRS,
+    });
   }
 
   if (settings.includeSkills && fs.existsSync(repoAgents)) {

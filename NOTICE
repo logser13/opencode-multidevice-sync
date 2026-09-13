@@ -1,0 +1,15 @@
+OpenCode Multidevice Sync
+
+This project is derived from opencode-github-sync version 3.0.1:
+https://github.com/doomsday616/opencode-github-sync
+Upstream revision: f9b2c200d3d67e161aaaf26c554c81c5fdea64dd
+Original copyright: Copyright (c) 2026 doomsday616
+Original license: MIT (retained in LICENSE).
+
+Modifications: Copyright (c) 2026 logser13 and contributors, MIT.
+Changes include non-destructive session import, deterministic exports,
+local project preservation, verified backups, conflict detection,
+path mapping, diagnostics, preview isolation and regression tests.
+
+Independent community fork. Not an official OpenCode component and not
+endorsed by the original author. No warranty; see LICENSE.

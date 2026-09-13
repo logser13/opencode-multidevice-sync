@@ -110,7 +110,7 @@ export function createRepo(target: RepoTarget, reporter: Reporter): void {
     `${target.owner}/${target.name}`,
     "--private",
     "--description",
-    "OpenCode configuration synced by opencode-github-sync",
+    "OpenCode configuration synced by opencode-multidevice-sync",
   ]);
   if (!result.ok) {
     throw new SetupError(`Could not create the repository: ${result.stderr || result.stdout}`);

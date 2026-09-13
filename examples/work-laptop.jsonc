@@ -1,0 +1,26 @@
+{
+  "repo": {
+    "owner": "YOUR_GITHUB_ACCOUNT",
+    "name": "my-opencode-config",
+    "branch": "main"
+  },
+  "machineAlias": "work-laptop",
+  "includeCredentials": false,
+  "includeSkills": true,
+  "includeState": false,
+  "extraPaths": [],
+  "sessions": {
+    "enabled": true,
+    "days": 30,
+    "maxSessions": 50,
+    "maxSessionBytes": 5242880,
+    "include": [],
+    "exclude": [],
+    "directories": [],
+    "backupBeforeImport": true,
+    "backupRetention": 10,
+    "pathMappings": []
+  },
+  "autoPullOnStartup": true,
+  "autoPushOnIdle": false
+}

@@ -1,10 +1,21 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import {
+  createDatabaseBackup,
+  latestDatabaseBackup,
+  listDatabaseBackups,
+  restoreDatabaseBackup,
+} from "../core/backup.js";
+import { git } from "../core/git.js";
+import { assertPrivateRemote } from "../core/guard.js";
+import { checkDatabaseHealth, healthProblems } from "../core/health.js";
 import { withSyncLock } from "../core/lock.js";
 import { getDatabasePath, getRoots } from "../core/paths.js";
 import { listSessions } from "../core/sessions.js";
+import { repoUrl } from "../core/settings.js";
 import {
   OVERRIDES_TEMPLATE,
   loadSettings,
@@ -142,14 +153,14 @@ function runStatus(): void {
   if (!state.configured) {
     fail("No sync repository configured.");
     write();
-    info("Run `opencode-sync init` to create one.");
+    info("Run `omds init` to create one.");
     const found = discoverSyncRepos();
     if (found.length > 0) {
       write();
       detail(
         `Existing private repositories that look like a match: ${found.slice(0, 5).join(", ")}`,
       );
-      detail("Link one with: opencode-sync link <owner/repo>");
+      detail("Link one with: omds link <owner/repo>");
     }
     write();
     return;
@@ -161,7 +172,7 @@ function runStatus(): void {
 
   if (!state.initialized) {
     write();
-    warn("The local repository is not initialised yet. Run `opencode-sync pull`.");
+    warn("The local repository is not initialised yet. Run `omds pull`.");
     write();
     return;
   }
@@ -220,9 +231,7 @@ function runInit(args: Args, mode: "init" | "link"): void {
   detail(`overrides ${result.overridesFile}`);
 
   heading("Next");
-  write(
-    `  ${paint("1.", style.faint)} ${mode === "init" ? "opencode-sync push" : "opencode-sync pull"}`,
-  );
+  write(`  ${paint("1.", style.faint)} ${mode === "init" ? "omds push" : "omds pull"}`);
   write(`  ${paint("2.", style.faint)} Restart OpenCode`);
   write();
 }
@@ -253,14 +262,14 @@ async function runSessions(args: Args): Promise<void> {
       write(`  ${paint(" ".repeat(16), style.faint)}  ${paint(session.id, style.faint)}`);
     }
     write();
-    detail(`Pin a session with: opencode-sync sessions include <id>`);
+    detail(`Pin a session with: omds sessions include <id>`);
     write();
     return;
   }
 
   if (sub === "include" || sub === "exclude") {
     const id = args.positional[1];
-    if (!id) throw new SyncError(`Usage: opencode-sync sessions ${sub} <session-id>`);
+    if (!id) throw new SyncError(`Usage: omds sessions ${sub} <session-id>`);
     const list = sub === "include" ? settings.sessions.include : settings.sessions.exclude;
     if (!list.includes(id)) list.push(id);
     saveSettings(settings, roots.config);
@@ -289,6 +298,111 @@ async function runSessions(args: Args): Promise<void> {
   throw new SyncError(`Unknown sessions subcommand: ${sub}`);
 }
 
+async function runDoctor(args: Args): Promise<void> {
+  const roots = getRoots();
+  const settings = loadSettings(roots.config);
+  const remote = repoUrl(settings);
+  const issues: string[] = [];
+  const database = getDatabasePath(roots);
+  let health: Awaited<ReturnType<typeof checkDatabaseHealth>> | undefined;
+  try {
+    health = await checkDatabaseHealth(database);
+    if (settings.sessions.enabled && !health.ok) issues.push(...healthProblems(health));
+  } catch (error) {
+    issues.push((error as Error).message);
+  }
+  if (!remote) issues.push("Sync repository is not configured");
+  else {
+    const reachable = git(["ls-remote", remote, "HEAD"], { cwd: roots.config });
+    if (!reachable.ok) issues.push("Remote is unreachable or authentication failed");
+    try {
+      assertPrivateRemote(remote, settings);
+    } catch (error) {
+      issues.push((error as Error).message);
+    }
+  }
+  const report = {
+    package: "opencode-multidevice-sync",
+    version: "0.1.0",
+    machine: settings.machineAlias ?? "auto",
+    database: health,
+    sessionSync: settings.sessions.enabled,
+    backupBeforeImport: settings.sessions.backupBeforeImport,
+    credentialsSync: settings.includeCredentials,
+    backups: listDatabaseBackups().length,
+    issues,
+    ok: issues.length === 0,
+    note: "Preflight checks only; not a guarantee of conflict-free concurrent editing. Keep one active device.",
+  };
+  if (args.flags.has("json")) console.log(JSON.stringify(report, null, 2));
+  else {
+    banner("doctor");
+    keyValue("version", report.version);
+    keyValue("machine", report.machine);
+    keyValue("sessions", String(health?.sessions ?? 0));
+    keyValue("messages", String(health?.messages ?? 0));
+    keyValue("parts", String(health?.parts ?? 0));
+    keyValue("database integrity", health?.ok ? "OK" : "NOT OK");
+    keyValue("backups", String(report.backups));
+    if (report.ok) ok("Preflight checks passed");
+    else for (const issue of issues) fail(issue);
+    info(report.note);
+    write();
+  }
+  if (!report.ok) process.exitCode = 1;
+}
+async function runBackup(): Promise<void> {
+  const roots = getRoots();
+  const settings = loadSettings(roots.config);
+  const result = await withSyncLock(roots.config, { waitMs: LOCK_WAIT_MS }, () =>
+    createDatabaseBackup(getDatabasePath(roots), undefined, settings.sessions.backupRetention),
+  );
+  banner("backup");
+  ok("Verified SQLite snapshot created");
+  detail(result.path);
+  detail(formatBytes(result.bytes));
+}
+function assertOpenCodeClosed(): void {
+  const windows = process.platform === "win32";
+  const check = spawnSync(
+    windows ? "tasklist.exe" : "ps",
+    windows ? ["/FO", "CSV", "/NH"] : ["-A", "-o", "comm="],
+    { encoding: "utf8", windowsHide: true, timeout: 10000 },
+  );
+  if (check.status !== 0) throw new SyncError("Cannot check running applications; restore refused");
+  if (
+    windows
+      ? /^"(?:opencode|opencode-cli)\.exe"/im.test(check.stdout)
+      : /(?:^|\/)(?:opencode|OpenCode)(?:\n|$)/m.test(check.stdout)
+  )
+    throw new SyncError("OpenCode is running. Close it cleanly before restoring.");
+}
+async function runRestore(args: Args): Promise<void> {
+  if (!args.flags.has("offline"))
+    throw new SyncError(
+      "Restore requires --offline and all OpenCode processes closed. --force cannot bypass this check.",
+    );
+  assertOpenCodeClosed();
+  const roots = getRoots();
+  const backup = args.positional[0]
+    ? { path: path.resolve(args.positional[0]) }
+    : latestDatabaseBackup();
+  if (!backup) throw new SyncError("No database backup found");
+  if (
+    !args.flags.has("yes") &&
+    !(await confirm("Restore verified backup?", [
+      backup.path,
+      "Existing database will be backed up first. No WAL files will be deleted.",
+    ]))
+  )
+    return;
+  const safety = await withSyncLock(roots.config, { waitMs: LOCK_WAIT_MS }, () =>
+    restoreDatabaseBackup(getDatabasePath(roots), backup.path, { offlineConfirmed: true }),
+  );
+  ok("Database restored");
+  if (safety) detail(`Previous database: ${safety}`);
+}
+
 function runOverrides(): void {
   banner("per-machine overrides");
   const roots = getRoots();
@@ -309,7 +423,7 @@ function runConfig(): void {
   const roots = getRoots();
   const file = settingsPath(roots.config);
   if (!fs.existsSync(file)) {
-    fail("No settings file yet. Run `opencode-sync init`.");
+    fail("No settings file yet. Run `omds init`.");
     write();
     return;
   }
@@ -337,6 +451,10 @@ function runHelp(): void {
   command("sessions include <id>", "Always sync a session, ignoring the time window");
   command("sessions exclude <id>", "Never sync a session");
 
+  heading("Safety and recovery");
+  command("doctor [--json]", "Check repository and database integrity");
+  command("backup", "Create a consistent verified SQLite backup");
+  command("restore [file] --offline", "Restore after OpenCode is fully closed");
   heading("Machine-local");
   command("overrides", "Open the per-machine configuration patch");
   command("config", "Show the current settings");
@@ -348,7 +466,7 @@ function runHelp(): void {
   write();
   rule();
   write(
-    `  ${paint("docs", style.faint)}  ${paint("https://github.com/doomsday616/opencode-github-sync", style.muted)}`,
+    `  ${paint("docs", style.faint)}  ${paint("https://github.com/logser13/opencode-multidevice-sync", style.muted)}`,
   );
   write();
 }
@@ -363,7 +481,20 @@ function command(name: string, description: string): void {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
+  if (args.flags.has("version")) {
+    console.log("0.1.0");
+    return;
+  }
   switch (args.command) {
+    case "doctor":
+      await runDoctor(args);
+      return;
+    case "backup":
+      await runBackup();
+      return;
+    case "restore":
+      await runRestore(args);
+      return;
     case "push":
     case "pull":
       await runSync(args.command, args);
@@ -395,7 +526,7 @@ async function main(): Promise<void> {
       banner();
       fail(`Unknown command: ${args.command}`);
       write();
-      info("Run `opencode-sync help` to see everything.");
+      info("Run `omds help` to see everything.");
       write();
       process.exitCode = 1;
   }

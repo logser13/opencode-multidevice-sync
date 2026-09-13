@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * Resolve every directory opencode-github-sync knows about.
+ * Resolve every directory opencode-multidevice-sync knows about.
  *
  * Each root can be overridden with an environment variable, which is what the
  * test-suite uses to run against a scratch directory instead of the real

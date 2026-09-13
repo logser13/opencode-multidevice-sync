@@ -35,6 +35,12 @@ export interface SessionSettings {
   exclude: string[];
   /** Only export sessions belonging to these project directories. */
   directories: string[];
+  /** Create a consistent SQLite backup before importing remote sessions. */
+  backupBeforeImport: boolean;
+  /** Number of automatic database backups to retain. */
+  backupRetention: number;
+  /** Rewrite machine-specific path prefixes while importing sessions. */
+  pathMappings: Array<{ from: string; to: string }>;
 }
 
 export interface Settings {
@@ -60,7 +66,7 @@ export const DEFAULT_SETTINGS: Settings = {
   repo: { branch: "main" },
   includeCredentials: false,
   includeSkills: true,
-  includeState: true,
+  includeState: false,
   extraPaths: [],
   sessions: {
     enabled: false,
@@ -70,6 +76,9 @@ export const DEFAULT_SETTINGS: Settings = {
     include: [],
     exclude: [],
     directories: [],
+    backupBeforeImport: true,
+    backupRetention: 10,
+    pathMappings: [],
   },
   autoPullOnStartup: true,
   autoPushOnIdle: false,
@@ -123,7 +132,7 @@ export function repoBranch(settings: Settings): string {
 }
 
 export const SETTINGS_TEMPLATE = `{
-  // opencode-github-sync settings. This file is never committed.
+  // opencode-multidevice-sync settings. This file is never committed.
   "repo": {
     "owner": "YOUR_GITHUB_USERNAME",
     "name": "my-opencode-config",
@@ -138,7 +147,7 @@ export const SETTINGS_TEMPLATE = `{
   "includeCredentials": false,
 
   "includeSkills": true,
-  "includeState": true,
+  "includeState": false,
 
   // Selective session sync. Off by default.
   "sessions": {
@@ -148,7 +157,10 @@ export const SETTINGS_TEMPLATE = `{
     "maxSessionBytes": 5242880,
     "include": [],
     "exclude": [],
-    "directories": []
+    "directories": [],
+    "backupBeforeImport": true,
+    "backupRetention": 10,
+    "pathMappings": []
   },
 
   "autoPullOnStartup": true,

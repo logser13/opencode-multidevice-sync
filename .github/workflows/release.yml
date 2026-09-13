@@ -1,61 +1,22 @@
-name: Release
-
+name: Verify release candidate
+# Manual validation only. No registry publishing or user installation changes.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
-
 permissions:
-  contents: write
-  id-token: write
-
+  contents: read
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
-          # Never restore a cache in a release build: the published artefact
-          # should come from exactly what is in the tag.
-          cache: ""
-
+          cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm run build
-
-      # A re-run of a release, or a tag pushed after publishing by hand, must not
-      # fail the whole workflow. npm rejects republishing a version, so check
-      # first and let the GitHub release step still run.
-      - name: Check whether this version is already on npm
-        id: published
-        run: |
-          version=$(node -p "require('./package.json').version")
-          if npm view "opencode-github-sync@${version}" version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::opencode-github-sync@${version} is already published; skipping npm publish."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Publishing uses a granular token with the 2FA bypass enabled, since the
-      # account's second factor is a passkey and cannot produce an OTP for CI.
-      #
-      # npm has announced that 2FA-bypass tokens lose direct publishing around
-      # January 2027 (https://gh.io/npm-gat-bypass2fa-deprecation). Before then
-      # this should move to trusted publishing (OIDC), which needs no secret at
-      # all: configure it at npmjs.com/package/opencode-github-sync/access, then
-      # delete both the NPM_TOKEN secret and the env block below.
-      - name: Publish to npm
-        if: steps.published.outputs.exists == 'false'
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Create the GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
+      - run: npm pack --dry-run
+      - run: npm audit --omit=dev

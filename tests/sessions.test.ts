@@ -58,6 +58,9 @@ const settings = (patch: Partial<SessionSettings> = {}): SessionSettings & { now
   include: [],
   exclude: [],
   directories: [],
+  backupBeforeImport: false,
+  backupRetention: 10,
+  pathMappings: [],
   ...patch,
 });
 
@@ -122,7 +125,7 @@ async function makeDatabase(file: string, now: number): Promise<void> {
 
 describe("selectSessions", () => {
   it("keeps sessions inside the window and drops older ones", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const file = path.join(root, "db.sqlite");
     await makeDatabase(file, now);
@@ -135,7 +138,7 @@ describe("selectSessions", () => {
   });
 
   it("always keeps explicitly included sessions", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const file = path.join(root, "db.sqlite");
     await makeDatabase(file, now);
@@ -148,7 +151,7 @@ describe("selectSessions", () => {
   });
 
   it("honours the exclude list even inside the window", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const file = path.join(root, "db.sqlite");
     await makeDatabase(file, now);
@@ -161,7 +164,7 @@ describe("selectSessions", () => {
   });
 
   it("applies the directory filter", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const file = path.join(root, "db.sqlite");
     await makeDatabase(file, now);
@@ -177,7 +180,7 @@ describe("selectSessions", () => {
   });
 
   it("caps how many sessions are selected, keeping the newest", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const file = path.join(root, "db.sqlite");
     await makeDatabase(file, now);
@@ -192,7 +195,7 @@ describe("selectSessions", () => {
 
 describe("export and import", () => {
   it("round-trips a session into an empty database", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const source = path.join(root, "source.sqlite");
     const repo = path.join(root, "repo");
@@ -228,7 +231,7 @@ describe("export and import", () => {
   });
 
   it("does not overwrite a session that is newer locally", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const source = path.join(root, "source.sqlite");
     const repo = path.join(root, "repo");
@@ -258,7 +261,7 @@ describe("export and import", () => {
   });
 
   it("skips a session larger than the configured cap", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const source = path.join(root, "source.sqlite");
     const repo = path.join(root, "repo");
@@ -282,8 +285,8 @@ describe("export and import", () => {
     expect(fs.existsSync(path.join(repo, "_sessions", "ses_recent.json.gz"))).toBe(false);
   });
 
-  it("removes shards that fall out of the retention window", async () => {
-    if (!available) return;
+  it("preserves remote shards unknown to this machine", async () => {
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const source = path.join(root, "source.sqlite");
     const repo = path.join(root, "repo");
@@ -292,11 +295,11 @@ describe("export and import", () => {
     await makeDatabase(source, now);
 
     await exportSessions(source, repo, { ...settings(), now }, silentReporter);
-    expect(fs.existsSync(path.join(repo, "_sessions", "ses_stale.json.gz"))).toBe(false);
+    expect(fs.existsSync(path.join(repo, "_sessions", "ses_stale.json.gz"))).toBe(true);
   });
 
   it("writes byte-identical shards on a repeat export", async () => {
-    if (!available) return;
+    expect(available, "SQLite is required: tests must actually execute").toBe(true);
     const now = Date.now();
     const source = path.join(root, "source.sqlite");
     const repo = path.join(root, "repo");

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { ensureFile, writeIfDiffers } from "./fsx.js";
 import { type GitResult, git, isGitRepo, toGitError } from "./git.js";
@@ -20,6 +21,13 @@ ${OVERRIDES_FILE}
 
 # Runtime / generated
 node_modules/
+*.backup-*
+*.bak-*
+*.omds-*
+*.edit-tmp
+.env
+.env.*
+_state/locks/
 bun.lock
 logs/
 **/__pycache__/
@@ -117,7 +125,16 @@ export function ensureGitIdentity(root: string): void {
 }
 
 export function writeRepoMetadata(root: string): void {
-  writeIfDiffers(path.join(root, ".gitignore"), DEFAULT_GITIGNORE);
+  const ignore = path.join(root, ".gitignore");
+  const current = fs.existsSync(ignore) ? fs.readFileSync(ignore, "utf8") : "";
+  const missing = DEFAULT_GITIGNORE.split("\n").filter(
+    (l) => l && !l.startsWith("#") && !current.split(/\r?\n/).includes(l),
+  );
+  if (missing.length)
+    writeIfDiffers(
+      ignore,
+      current + (current.endsWith("\n") ? "" : "\n") + missing.join("\n") + "\n",
+    );
   writeIfDiffers(path.join(root, ".gitattributes"), DEFAULT_GITATTRIBUTES);
 }
 

@@ -1,180 +1,88 @@
 import fs from "node:fs";
+import { tool } from "@opencode-ai/plugin";
 import { withSyncLock } from "../core/lock.js";
 import { getRoots } from "../core/paths.js";
 import { CollectingReporter } from "../core/reporter.js";
 import { loadSettings, repoUrl, settingsPath } from "../core/settings.js";
 import { pull, push, status } from "../core/sync.js";
-
-/**
- * OpenCode plugin entry point.
- *
- * The plugin is a convenience layer, never the only way in. It runs inside the
- * OpenCode process, which means it cannot help when the configuration it just
- * synced is what stops OpenCode from starting. The CLI stays the rescue path,
- * and both call the exact same core.
- *
- * What the plugin adds:
- *   - a pull on startup, so a machine you have not touched in a week is current
- *   - an optional push when a session goes idle
- *   - an `opencode_sync` tool, so syncing can be asked for in plain language
- *
- * Everything is off unless the user configured a repository, and every failure
- * is reported as a toast instead of taking OpenCode down with it.
- */
-
-type ToastVariant = "info" | "success" | "warning" | "error";
-
-interface PluginContext {
-  client?: any;
-  directory?: string;
-}
-
-async function toast(client: any, message: string, variant: ToastVariant): Promise<void> {
-  try {
-    await client?.tui?.showToast?.({ body: { message, variant } });
-  } catch {
-    // The TUI is not attached (headless run) — nothing to show.
-  }
-}
-
-async function log(client: any, level: string, message: string, extra?: unknown): Promise<void> {
+const startups = new Map<string, Promise<boolean>>();
+const timers = new Map<string, ReturnType<typeof setTimeout>>();
+async function notify(client: any, message: string, failed = false) {
   try {
     await client?.app?.log?.({
-      body: { service: "opencode-github-sync", level, message, extra },
+      body: { service: "opencode-multidevice-sync", level: failed ? "error" : "info", message },
     });
-  } catch {
-    // Logging must never break a sync.
-  }
-}
-
-function isConfigured(): boolean {
-  const roots = getRoots();
-  if (!fs.existsSync(settingsPath(roots.config))) return false;
+  } catch {}
   try {
-    return Boolean(repoUrl(loadSettings(roots.config)));
-  } catch {
-    return false;
-  }
+    await client?.tui?.showToast?.({
+      body: { title: "OpenCode Multidevice Sync", message, variant: failed ? "error" : "success" },
+    });
+  } catch {}
 }
-
-async function runPull(client: any, announce: boolean): Promise<void> {
+export default async function OpencodeMultideviceSync(ctx: { client?: any; directory?: string }) {
   const roots = getRoots();
-  const reporter = new CollectingReporter();
-  try {
-    const result = await withSyncLock(roots.config, { waitMs: 30_000 }, () =>
-      pull({ reporter, roots }),
-    );
-    await log(client, "info", `pull: ${result.message}`, { summary: result.summary });
-    if (result.changed) {
-      await toast(
-        client,
-        `Config updated from GitHub (${result.files.length} file(s)). Restart OpenCode to apply.`,
-        "success",
+  const client = ctx.client;
+  if (!fs.existsSync(settingsPath(roots.config)) || !repoUrl(loadSettings(roots.config))) return {};
+  async function perform(action: "push" | "pull", announce: boolean): Promise<boolean> {
+    try {
+      const reporter = new CollectingReporter();
+      const result = await withSyncLock(roots.config, { waitMs: 30000 }, () =>
+        action === "push" ? push({ roots, reporter }) : pull({ roots, reporter }),
       );
-    } else if (announce) {
-      await toast(client, "Config already up to date.", "info");
+      const message =
+        `${action}: ${result.message}` +
+        (result.restartRequired ? ". Restart OpenCode to reload imported data/config." : "");
+      if (announce || result.changed) await notify(client, message);
+      else
+        try {
+          await client?.app?.log?.({
+            body: { service: "opencode-multidevice-sync", level: "info", message },
+          });
+        } catch {}
+      return true;
+    } catch (error) {
+      await notify(client, `${action} failed: ${(error as Error).message}`, true);
+      return false;
     }
-  } catch (error) {
-    const message = (error as Error).message;
-    await log(client, "warn", `pull failed: ${message}`);
-    if (announce) await toast(client, `Sync pull failed: ${message}`, "error");
   }
-}
-
-async function runPush(client: any, announce: boolean): Promise<void> {
-  const roots = getRoots();
-  const reporter = new CollectingReporter();
-  try {
-    const result = await withSyncLock(roots.config, { waitMs: 30_000 }, () =>
-      push({ reporter, roots }),
-    );
-    await log(client, "info", `push: ${result.message}`);
-    if (announce) {
-      await toast(client, result.message, result.changed ? "success" : "info");
-    }
-  } catch (error) {
-    const message = (error as Error).message;
-    await log(client, "warn", `push failed: ${message}`);
-    if (announce) await toast(client, `Sync push failed: ${message}`, "error");
+  let startup = startups.get(roots.config);
+  if (!startup) {
+    startup = loadSettings(roots.config).autoPullOnStartup
+      ? perform("pull", false)
+      : Promise.resolve(true);
+    startups.set(roots.config, startup);
   }
-}
-
-export const OpencodeGithubSync = async (ctx: PluginContext) => {
-  const client = ctx?.client;
-  const roots = getRoots();
-
-  if (!isConfigured()) {
-    await log(
-      client,
-      "info",
-      "opencode-github-sync is installed but no repository is configured. Run `opencode-sync init`.",
-    );
-    return {};
-  }
-
-  const settings = loadSettings(roots.config);
-
-  if (settings.autoPullOnStartup) {
-    // Deliberately not awaited: OpenCode should finish starting even when the
-    // network is slow or GitHub is unreachable.
-    void runPull(client, false);
-  }
-
   return {
     event: async ({ event }: { event: { type: string } }) => {
-      if (event.type === "session.idle" && settings.autoPushOnIdle) {
-        void runPush(client, false);
-      }
+      if (event.type !== "session.idle" || !loadSettings(roots.config).autoPushOnIdle) return;
+      const previous = timers.get(roots.config);
+      if (previous) clearTimeout(previous);
+      timers.set(
+        roots.config,
+        setTimeout(async () => {
+          timers.delete(roots.config);
+          if (await startup) await perform("push", true);
+          else
+            await notify(
+              client,
+              "Auto-push paused: initial pull failed. Resolve the error and restart OpenCode.",
+              true,
+            );
+        }, 1000),
+      );
     },
-
     tool: {
-      opencode_sync: {
+      opencode_sync: tool({
         description:
-          "Sync OpenCode configuration with the GitHub sync repository. " +
-          "Use action 'push' to upload this machine's configuration, 'pull' to apply the shared " +
-          "configuration, or 'status' to report what is out of sync.",
-        args: {
-          action: {
-            type: "string",
-            enum: ["push", "pull", "status"],
-            description: "Which sync operation to run.",
-          },
+          "Sync this OpenCode installation with its configured private repository. Report status, push, or pull. Never resolves conflicts with force.",
+        args: { action: tool.schema.enum(["status", "push", "pull"]) },
+        async execute(args) {
+          if (args.action === "status") return JSON.stringify(status({ roots }), null, 2);
+          return (await perform(args.action, true))
+            ? "Sync completed; see sync status and notifications."
+            : "Sync failed. Review the error notification/log; data was not force-overwritten.";
         },
-        async execute(args: { action?: string }) {
-          const action = args?.action ?? "status";
-          const reporter = new CollectingReporter();
-
-          if (action === "status") {
-            const state = status({ roots });
-            return JSON.stringify(state, null, 2);
-          }
-
-          const result = await withSyncLock(roots.config, { waitMs: 60_000 }, () =>
-            action === "push" ? push({ reporter, roots }) : pull({ reporter, roots }),
-          );
-
-          const lines = [result.message];
-          if (result.files.length > 0) {
-            lines.push(
-              `Files: ${result.files
-                .slice(0, 20)
-                .map((f) => `${f.kind[0]} ${f.path}`)
-                .join(", ")}`,
-            );
-          }
-          if (result.restartRequired && result.changed) {
-            lines.push("Restart OpenCode for the new configuration to take effect.");
-          }
-          if (reporter.lines.length > 0) {
-            lines.push(
-              ...reporter.lines.filter((l) => l.level === "warn").map((l) => `! ${l.message}`),
-            );
-          }
-          return lines.join("\n");
-        },
-      },
+      }),
     },
   };
-};
-
-export default OpencodeGithubSync;
+}

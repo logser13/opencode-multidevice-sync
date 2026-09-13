@@ -1,7 +1,10 @@
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { createDatabaseBackup } from "./backup.js";
 import { ensureDir } from "./fsx.js";
+import { healthProblems, inspectDatabase } from "./health.js";
 import { SESSIONS_DIR } from "./paths.js";
 import type { Reporter } from "./reporter.js";
 import type { SessionSettings } from "./settings.js";
@@ -10,7 +13,7 @@ import { type SqliteDatabase, existingTables, openDatabase, tableColumns } from 
 /**
  * Selective session sync.
  *
- * The naive approach — commit `opencode.db` — stops working almost immediately.
+ * The naive approach - committing `opencode.db` - stops working almost immediately.
  * A real database reaches several gigabytes, dominated by tool output stored in
  * `part.data`, and Git has no way to delta-compress it. Worse, copying a live
  * database together with its write-ahead log can capture a torn state that only
@@ -76,12 +79,25 @@ export interface ExportResult {
   written: string[];
   skippedTooLarge: { id: string; title: string; bytes: number }[];
   considered: number;
+  conflicts?: string[];
 }
 
 export interface ImportResult {
   imported: number;
   skippedOlder: number;
+  conflicts: { sessionId: string; reason: string }[];
   failed: { file: string; reason: string }[];
+  backup?: string;
+  rolledBack?: boolean;
+  dryRun?: boolean;
+}
+
+export interface ImportOptions {
+  dryRun?: boolean;
+  preferRemote?: boolean;
+  backupBeforeImport?: boolean;
+  backupRetention?: number;
+  pathMappings?: Array<{ from: string; to: string }>;
 }
 
 function shardPath(repoRoot: string, sessionId: string): string {
@@ -157,234 +173,406 @@ export function selectSessions(db: SqliteDatabase, options: SelectOptions): Sess
   return selected;
 }
 
-function buildShard(db: SqliteDatabase, sessionId: string, tables: string[]): SessionShard {
-  const sessionRow = readRows(db, "SELECT * FROM session WHERE id = ?", [sessionId])[0];
-  if (!sessionRow) throw new Error(`Session ${sessionId} disappeared while exporting`);
-
-  const shard: SessionShard = {
-    formatVersion: 1,
-    session: sessionRow,
-    tables: {},
-    exportedAt: Date.now(),
-  };
-
-  const projectId = sessionRow.project_id;
-  if (projectId) {
-    shard.project = readRows(db, "SELECT * FROM project WHERE id = ?", [projectId])[0];
-  }
-  const workspaceId = (sessionRow as any).workspace_id;
-  if (workspaceId) {
-    const rows = readRows(db, "SELECT * FROM workspace WHERE id = ?", [workspaceId]);
-    if (rows[0]) shard.workspace = rows[0];
-  }
-
-  for (const table of tables) {
-    shard.tables[table] = readRows(db, `SELECT * FROM "${table}" WHERE session_id = ?`, [
-      sessionId,
-    ]);
-  }
-
-  return shard;
+type Row = Record<string, unknown>;
+type Mapping = { from: string; to: string };
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical((value as Row)[k])}`)
+      .join(",")}}`;
+  return JSON.stringify(value ?? null);
 }
-
-/** Export the selected sessions into `<repo>/_sessions`. */
-export async function exportSessions(
-  databaseFile: string,
-  repoRoot: string,
-  options: SelectOptions,
-  reporter: Reporter,
-): Promise<ExportResult> {
-  const result: ExportResult = { written: [], skippedTooLarge: [], considered: 0 };
-  if (!fs.existsSync(databaseFile)) return result;
-
-  const db = await openDatabase(databaseFile, { readOnly: true });
-  try {
-    const tables = existingTables(db, [...SESSION_TABLES]).filter((table) =>
-      tableColumns(db, table).includes("session_id"),
-    );
-    const sessions = selectSessions(db, options);
-    result.considered = sessions.length;
-
-    const outDir = path.join(repoRoot, SESSIONS_DIR);
-    ensureDir(outDir);
-
-    const keep = new Set<string>();
-
-    for (const session of sessions) {
-      const shard = buildShard(db, session.id, tables);
-      const payload = gzipSync(Buffer.from(JSON.stringify(shard)), { level: 9 });
-
-      if (payload.byteLength > options.maxSessionBytes) {
-        result.skippedTooLarge.push({
-          id: session.id,
-          title: session.title,
-          bytes: payload.byteLength,
-        });
-        continue;
-      }
-
-      const file = shardPath(repoRoot, session.id);
-      keep.add(path.basename(file));
-      // Only rewrite when the payload actually changed, otherwise every push
-      // would produce a diff for every session purely from the gzip timestamp.
-      if (!fs.existsSync(file) || !fs.readFileSync(file).equals(payload)) {
-        fs.writeFileSync(file, payload);
-      }
-      result.written.push(session.id);
-    }
-
-    pruneShards(outDir, keep, options, reporter);
-  } finally {
-    db.close();
-  }
-
-  return result;
-}
-
-/**
- * Delete shards that no longer qualify.
- *
- * A shard is removed when it is outside the retention window, so the repository
- * does not accumulate every session ever synced. Shards for explicitly included
- * sessions are always kept.
- */
-function pruneShards(
-  outDir: string,
-  keep: Set<string>,
-  options: SelectOptions,
-  reporter: Reporter,
-): void {
-  let removed = 0;
-  const includeFiles = new Set(options.include.map((id) => `${sanitizeId(id)}.json.gz`));
-  for (const entry of fs.readdirSync(outDir)) {
-    if (!entry.endsWith(".json.gz")) continue;
-    if (keep.has(entry) || includeFiles.has(entry)) continue;
-    fs.rmSync(path.join(outDir, entry), { force: true });
-    removed++;
-  }
-  if (removed > 0)
-    reporter.detail(`Removed ${removed} session shard(s) outside the retention window`);
-}
-
-function readShard(file: string): SessionShard {
-  const raw = gunzipSync(fs.readFileSync(file));
-  const shard = JSON.parse(raw.toString("utf8")) as SessionShard;
-  if (shard.formatVersion !== 1) {
-    throw new Error(`Unsupported shard format v${shard.formatVersion}`);
-  }
-  return shard;
-}
-
-function upsert(
-  db: SqliteDatabase,
-  table: string,
-  row: Record<string, unknown>,
-  allowedColumns: Set<string>,
-): void {
-  const columns = Object.keys(row).filter((column) => allowedColumns.has(column));
-  if (columns.length === 0) return;
-  const placeholders = columns.map(() => "?").join(", ");
-  const quoted = columns.map((column) => `"${column}"`).join(", ");
-  db.prepare(`INSERT OR REPLACE INTO "${table}" (${quoted}) VALUES (${placeholders})`).run(
-    ...columns.map((column) => normalize(row[column])),
-  );
-}
-
-/** SQLite drivers accept null/number/string/bigint/Buffer only. */
-function normalize(value: unknown): unknown {
-  if (value === undefined) return null;
-  if (typeof value === "boolean") return value ? 1 : 0;
-  if (value !== null && typeof value === "object" && !Buffer.isBuffer(value)) {
-    return JSON.stringify(value);
+function mapPath(value: unknown, mappings: Mapping[]): unknown {
+  if (typeof value !== "string") return value;
+  const candidate = value.replace(/\\/g, "/");
+  for (const m of [...mappings].sort((a, b) => b.from.length - a.from.length)) {
+    const from = m.from.replace(/\\/g, "/").replace(/\/$/, "");
+    const windows = /^[a-z]:/i.test(from);
+    const c = windows ? candidate.toLowerCase() : candidate;
+    const f = windows ? from.toLowerCase() : from;
+    if (c === f || c.startsWith(`${f}/`))
+      return m.to.replace(/\\/g, "/").replace(/\/$/, "") + candidate.slice(from.length);
   }
   return value;
 }
-
-/** Import every shard from `<repo>/_sessions` into the local database. */
-export async function importSessions(
-  databaseFile: string,
-  repoRoot: string,
-  reporter: Reporter,
-): Promise<ImportResult> {
-  const result: ImportResult = { imported: 0, skippedOlder: 0, failed: [] };
-  const shardDir = path.join(repoRoot, SESSIONS_DIR);
-  if (!fs.existsSync(shardDir)) return result;
-
-  const files = fs.readdirSync(shardDir).filter((f) => f.endsWith(".json.gz"));
-  if (files.length === 0) return result;
-  if (!fs.existsSync(databaseFile)) {
-    reporter.warn("No local OpenCode database yet — start OpenCode once, then pull again.");
-    return result;
+function mapRow(table: string, row: Row, mappings: Mapping[]): Row {
+  const copy = { ...row };
+  for (const key of table === "session"
+    ? ["directory", "path"]
+    : table === "project"
+      ? ["worktree"]
+      : []) {
+    if (key in copy) copy[key] = mapPath(copy[key], mappings);
   }
-
-  const db = await openDatabase(databaseFile);
+  return copy;
+}
+function buildShard(
+  db: SqliteDatabase,
+  id: string,
+  tables: string[],
+  mappings: Mapping[] = [],
+): SessionShard {
+  const row = readRows(db, "SELECT * FROM session WHERE id=?", [id])[0];
+  if (!row) throw new Error(`Session ${id} disappeared while exporting`);
+  const reverse = mappings.map((m) => ({ from: m.to, to: m.from }));
+  const shard: SessionShard = {
+    formatVersion: 1,
+    session: mapRow("session", row, reverse),
+    tables: {},
+    exportedAt: Number(row.time_updated ?? 0),
+  };
+  if (row.project_id && row.project_id !== "global") {
+    const project = readRows(db, "SELECT * FROM project WHERE id=?", [row.project_id])[0];
+    if (project) shard.project = mapRow("project", project, reverse);
+  }
+  if (row.workspace_id) {
+    const ws = readRows(db, "SELECT * FROM workspace WHERE id=?", [row.workspace_id])[0];
+    if (ws) shard.workspace = ws;
+  }
+  for (const table of tables)
+    shard.tables[table] = readRows(db, `SELECT * FROM "${table}" WHERE session_id=?`, [id]).sort(
+      (a, b) => {
+        const x = canonical(a);
+        const y = canonical(b);
+        return x < y ? -1 : x > y ? 1 : 0;
+      },
+    );
+  return shard;
+}
+function contentHash(shard: SessionShard): string {
+  const tables = Object.fromEntries(
+    Object.entries(shard.tables)
+      .filter(([, rows]) => rows.length)
+      .map(([t, rows]) => [
+        t,
+        [...rows].sort((a, b) => {
+          const x = canonical(a);
+          const y = canonical(b);
+          return x < y ? -1 : x > y ? 1 : 0;
+        }),
+      ]),
+  );
+  return createHash("sha256")
+    .update(canonical({ session: shard.session, tables }))
+    .digest("hex");
+}
+function readBases(file: string): Record<string, string> {
+  if (!fs.existsSync(file + ".omds-bases.json")) return {};
+  const raw = JSON.parse(fs.readFileSync(file + ".omds-bases.json", "utf8"));
+  if (raw.version !== 1 || !raw.hashes || typeof raw.hashes !== "object")
+    throw new Error("Invalid local sync baseline; refusing to guess conflict resolution");
+  return raw.hashes;
+}
+function saveBases(file: string, hashes: Record<string, string>): void {
+  const target = file + ".omds-bases.json";
+  const temp = target + `.${randomUUID()}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify({ version: 1, hashes }), { mode: 0o600 });
+  fs.renameSync(temp, target);
+}
+function readShard(file: string): SessionShard {
+  if (fs.statSync(file).size > 64 * 1024 * 1024)
+    throw new Error("Compressed shard exceeds 64 MiB safety limit");
+  const s = JSON.parse(
+    gunzipSync(fs.readFileSync(file), { maxOutputLength: 128 * 1024 * 1024 }).toString("utf8"),
+  ) as SessionShard;
+  if (
+    s.formatVersion !== 1 ||
+    !s.session ||
+    typeof s.session.id !== "string" ||
+    !/^[A-Za-z0-9._-]+$/.test(s.session.id)
+  )
+    throw new Error("Invalid session shard");
+  if (path.basename(file) !== `${s.session.id}.json.gz`)
+    throw new Error("Shard filename does not match session id");
+  if (!Number.isFinite(s.session.time_updated) || !s.tables || typeof s.tables !== "object")
+    throw new Error("Invalid shard metadata");
+  if (s.project && s.project.id !== s.session.project_id)
+    throw new Error("Project ownership mismatch");
+  if (s.workspace && s.workspace.id !== s.session.workspace_id)
+    throw new Error("Workspace ownership mismatch");
+  for (const [table, rows] of Object.entries(s.tables)) {
+    if (!(SESSION_TABLES as readonly string[]).includes(table) || !Array.isArray(rows))
+      throw new Error(`Unsupported shard table: ${table}`);
+    for (const row of rows)
+      if (!row || row.session_id !== s.session.id)
+        throw new Error(`Row ownership mismatch in ${table}`);
+  }
+  return s;
+}
+function availableTables(db: SqliteDatabase): string[] {
+  return existingTables(db, [...SESSION_TABLES]).filter((t) =>
+    tableColumns(db, t).includes("session_id"),
+  );
+}
+export async function exportSessions(
+  file: string,
+  repo: string,
+  options: SelectOptions,
+  reporter: Reporter,
+): Promise<ExportResult> {
+  const result: ExportResult = { written: [], skippedTooLarge: [], considered: 0, conflicts: [] };
+  if (!fs.existsSync(file)) return result;
+  const bases = readBases(file);
+  const db = await openDatabase(file, { readOnly: true });
   try {
-    const columnsFor = new Map<string, Set<string>>();
-    const columns = (table: string): Set<string> => {
-      let set = columnsFor.get(table);
-      if (!set) {
-        set = new Set(tableColumns(db, table));
-        columnsFor.set(table, set);
-      }
-      return set;
-    };
-
-    const localTimes = new Map<string, number>();
-    for (const row of readRows(db, "SELECT id, time_updated FROM session", []) as any[]) {
-      localTimes.set(String(row.id), Number(row.time_updated ?? 0));
-    }
-
-    for (const file of files) {
-      const full = path.join(shardDir, file);
-      try {
-        const shard = readShard(full);
-        const sessionId = String(shard.session.id);
-        const incoming = Number(shard.session.time_updated ?? 0);
-        const local = localTimes.get(sessionId);
-
-        // Last-writer-wins at session granularity. A session that is newer
-        // locally is left completely alone, so an in-progress conversation is
-        // never clobbered by a stale copy from another machine.
-        if (local !== undefined && local >= incoming) {
-          result.skippedOlder++;
+    db.exec("BEGIN");
+    const tables = availableTables(db);
+    const selected = selectSessions(db, options);
+    result.considered = selected.length;
+    ensureDir(path.join(repo, SESSIONS_DIR));
+    for (const session of selected) {
+      const shard = buildShard(db, session.id, tables, options.pathMappings ?? []);
+      const dest = shardPath(repo, session.id);
+      if (fs.existsSync(dest)) {
+        const remote = readShard(dest);
+        const remoteHash = contentHash(remote);
+        const localHash = contentHash(shard);
+        if (remoteHash !== localHash && bases[session.id] !== remoteHash) {
+          result.conflicts?.push(session.id);
+          reporter.warn(`Export conflict ${session.id}: pull/review remote changes first`);
           continue;
         }
-
-        db.exec("BEGIN IMMEDIATE");
-        try {
-          if (shard.project) upsert(db, "project", shard.project, columns("project"));
-          if (shard.workspace) upsert(db, "workspace", shard.workspace, columns("workspace"));
-          upsert(db, "session", shard.session, columns("session"));
-
-          for (const [table, rows] of Object.entries(shard.tables)) {
-            if (rows.length === 0) continue;
-            let allowed: Set<string>;
-            try {
-              allowed = columns(table);
-            } catch {
-              continue; // Table does not exist in this OpenCode version.
-            }
-            if (allowed.size === 0) continue;
-            for (const row of rows) upsert(db, table, row, allowed);
-          }
-          db.exec("COMMIT");
-          result.imported++;
-        } catch (err) {
-          db.exec("ROLLBACK");
-          throw err;
-        }
-      } catch (err) {
-        result.failed.push({ file, reason: (err as Error).message });
       }
+      const payload = gzipSync(Buffer.from(canonical(shard)), { level: 9 });
+      if (payload.length > options.maxSessionBytes) {
+        result.skippedTooLarge.push({
+          id: session.id,
+          title: session.title,
+          bytes: payload.length,
+        });
+        continue;
+      }
+      if (!fs.existsSync(dest) || !fs.readFileSync(dest).equals(payload)) {
+        const tmp = dest + `.${randomUUID()}.tmp`;
+        fs.writeFileSync(tmp, payload, { mode: 0o600 });
+        fs.renameSync(tmp, dest);
+      }
+      result.written.push(session.id);
     }
+    // Never delete remote shards merely because this machine lacks a session or has a different retention window.
+    db.exec("COMMIT");
+    return result;
   } finally {
     db.close();
   }
-
-  return result;
+}
+export async function acknowledgeExport(
+  file: string,
+  repo: string,
+  mappings: Mapping[] = [],
+): Promise<void> {
+  if (!fs.existsSync(file)) return;
+  const bases = readBases(file);
+  const db = await openDatabase(file, { readOnly: true });
+  try {
+    const tables = availableTables(db);
+    for (const row of readRows(db, "SELECT id FROM session", [])) {
+      const id = String(row.id);
+      const p = shardPath(repo, id);
+      if (!fs.existsSync(p)) continue;
+      const incoming = contentHash(readShard(p));
+      const local = contentHash(buildShard(db, id, tables, mappings));
+      if (incoming === local) bases[id] = local;
+    }
+    saveBases(file, bases);
+  } finally {
+    db.close();
+  }
+}
+function normalize(value: unknown): unknown {
+  if (value === undefined) return null;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (value !== null && typeof value === "object" && !Buffer.isBuffer(value))
+    return JSON.stringify(value);
+  return value;
+}
+function upsert(db: SqliteDatabase, table: string, row: Row): void {
+  const allowed = tableColumns(db, table);
+  if (!allowed.length) throw new Error(`Missing table ${table}`);
+  const columns = Object.keys(row).filter((c) => allowed.includes(c));
+  if (columns.length !== Object.keys(row).length)
+    throw new Error(`Schema mismatch in ${table}; unsupported columns present`);
+  const q = (c: string) => `"${c.replace(/"/g, '""')}"`;
+  const quoted = columns.map(q).join(",");
+  const places = columns.map(() => "?").join(",");
+  const updates = columns.map((c) => `${q(c)}=excluded.${q(c)}`).join(",");
+  if (allowed.includes("session_id") && allowed.includes("id") && row.id) {
+    const existing = readRows(db, `SELECT session_id FROM ${q(table)} WHERE id=?`, [row.id])[0];
+    if (existing && existing.session_id !== row.session_id)
+      throw new Error(`Existing row belongs to another session: ${table}`);
+  }
+  db.prepare(
+    `INSERT INTO ${q(table)} (${quoted}) VALUES (${places}) ON CONFLICT DO UPDATE SET ${updates}`,
+  ).run(...columns.map((c) => normalize(row[c])));
 }
 
-/** List sessions available locally, newest first — powers `sessions list`. */
+export async function importSessions(
+  file: string,
+  repo: string,
+  reporter: Reporter,
+  options: ImportOptions = {},
+): Promise<ImportResult> {
+  const result: ImportResult = {
+    imported: 0,
+    skippedOlder: 0,
+    conflicts: [],
+    failed: [],
+    dryRun: options.dryRun ?? false,
+  };
+  const dir = path.join(repo, SESSIONS_DIR);
+  if (!fs.existsSync(dir)) return result;
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".json.gz"))
+    .sort();
+  if (!files.length) return result;
+  if (!fs.existsSync(file)) {
+    result.failed.push({
+      file: "<database>",
+      reason: "Start OpenCode once to initialize its schema, then pull again",
+    });
+    return result;
+  }
+  const bases = readBases(file);
+  const nextBases = { ...bases };
+  const mappings = options.pathMappings ?? [];
+  const db = await openDatabase(file, { readOnly: options.dryRun ?? false });
+  let transaction = false;
+  try {
+    db.exec(options.dryRun ? "BEGIN" : "BEGIN IMMEDIATE");
+    transaction = true;
+    const before = inspectDatabase(db);
+    if (!before.ok) throw new Error(`Unsafe database: ${healthProblems(before).join("; ")}`);
+    const tables = availableTables(db);
+    const plan: Array<{ name: string; shard: SessionShard; hash: string }> = [];
+    for (const name of files) {
+      try {
+        const shard = readShard(path.join(dir, name));
+        const id = String(shard.session.id);
+        const hash = contentHash(shard);
+        const localRow = readRows(db, "SELECT * FROM session WHERE id=?", [id])[0];
+        if (localRow) {
+          const localShard = buildShard(db, id, tables, mappings);
+          const localHash = contentHash(localShard);
+          if (hash === localHash) {
+            result.skippedOlder++;
+            nextBases[id] = hash;
+            continue;
+          }
+          const base = bases[id];
+          if (base === hash) {
+            result.skippedOlder++;
+            continue;
+          }
+          if (!options.preferRemote && (!base || localHash !== base)) {
+            if (Number(localRow.time_updated) > Number(shard.session.time_updated))
+              result.skippedOlder++;
+            result.conflicts.push({
+              sessionId: id,
+              reason: base
+                ? "both devices changed since last sync"
+                : "different local history without a common baseline",
+            });
+            continue;
+          }
+          // Do not silently prune local history, even when an incoming snapshot is newer.
+          for (const table of tables) {
+            const keys = (
+              db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{
+                name: string;
+                pk: number;
+              }>
+            )
+              .filter((c) => c.pk > 0)
+              .sort((a, b) => a.pk - b.pk)
+              .map((c) => c.name);
+            if (!keys.length) throw new Error(`No primary key in ${table}`);
+            const identity = (row: Row) => canonical(keys.map((k) => row[k]));
+            const incoming = new Set((shard.tables[table] ?? []).map(identity));
+            if ((localShard.tables[table] ?? []).some((row) => !incoming.has(identity(row))))
+              throw new Error(
+                `Incoming snapshot would discard local ${table} rows; explicit reconciliation required`,
+              );
+          }
+        }
+        plan.push({ name, shard, hash });
+      } catch (error) {
+        result.failed.push({ file: name, reason: (error as Error).message });
+      }
+    }
+    if (result.failed.length || result.conflicts.length) {
+      db.exec("ROLLBACK");
+      transaction = false;
+      result.rolledBack = true;
+      for (const c of result.conflicts)
+        reporter.warn(`Session conflict ${c.sessionId}: ${c.reason}; no sessions imported`);
+      return result;
+    }
+    if (options.dryRun) {
+      result.imported = plan.length;
+      db.exec("ROLLBACK");
+      transaction = false;
+      return result;
+    }
+    if (plan.length && options.backupBeforeImport !== false) {
+      const backup = await createDatabaseBackup(file, undefined, options.backupRetention ?? 10);
+      result.backup = backup.path;
+      reporter.detail(`Verified backup: ${backup.path}`);
+    }
+    for (const item of plan) {
+      const { shard } = item;
+      const session = mapRow("session", shard.session, mappings);
+      const id = String(session.id);
+      const projectId = session.project_id;
+      const project = readRows(db, "SELECT id FROM project WHERE id=?", [projectId])[0];
+      if (!project) {
+        if (projectId === "global")
+          throw new Error("Synthetic global project must be initialized locally by OpenCode");
+        if (!shard.project) throw new Error("Missing project row in session shard");
+        upsert(db, "project", mapRow("project", shard.project, mappings));
+      }
+      if (
+        shard.workspace &&
+        !readRows(db, "SELECT id FROM workspace WHERE id=?", [shard.workspace.id])[0]
+      )
+        upsert(db, "workspace", shard.workspace);
+      upsert(db, "session", session);
+      // Insert referenced messages before parts, independent of JSON object key order.
+      for (const table of [
+        "message",
+        "part",
+        ...SESSION_TABLES.filter((t) => t !== "message" && t !== "part"),
+      ]) {
+        for (const row of shard.tables[table] ?? []) upsert(db, table, row);
+      }
+      nextBases[id] = item.hash;
+      result.imported++;
+    }
+    const after = inspectDatabase(db);
+    if (!after.ok || after.sessions < before.sessions)
+      throw new Error(`Post-import integrity failed: ${healthProblems(after).join("; ")}`);
+    db.exec("COMMIT");
+    transaction = false;
+    saveBases(file, nextBases);
+    return result;
+  } catch (error) {
+    if (transaction) {
+      db.exec("ROLLBACK");
+      transaction = false;
+      result.imported = 0;
+      result.rolledBack = true;
+    }
+    result.failed.push({ file: "<transaction>", reason: (error as Error).message });
+    return result;
+  } finally {
+    if (transaction) db.exec("ROLLBACK");
+    db.close();
+  }
+}
+
+/** List sessions available locally, newest first - powers `sessions list`. */
 export async function listSessions(databaseFile: string, limit: number): Promise<SessionRecord[]> {
   if (!fs.existsSync(databaseFile)) return [];
   const db = await openDatabase(databaseFile, { readOnly: true });

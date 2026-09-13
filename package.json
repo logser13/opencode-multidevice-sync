@@ -1,29 +1,32 @@
 {
-  "name": "opencode-github-sync",
-  "version": "3.0.1",
-  "description": "Sync your OpenCode config, skills, and selected sessions across machines via a private GitHub repo — as a plugin or a CLI.",
+  "name": "opencode-multidevice-sync",
+  "version": "0.1.0",
+  "description": "Reliable multi-device synchronization for OpenCode configuration, sessions, skills and plugins with safety checks, backups and recovery.",
   "type": "module",
   "license": "MIT",
-  "author": "doomsday616",
-  "homepage": "https://github.com/doomsday616/opencode-github-sync#readme",
+  "author": "logser13 and contributors",
+  "homepage": "https://github.com/logser13/opencode-multidevice-sync#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/doomsday616/opencode-github-sync.git"
+    "url": "git+https://github.com/logser13/opencode-multidevice-sync.git"
   },
   "bugs": {
-    "url": "https://github.com/doomsday616/opencode-github-sync/issues"
+    "url": "https://github.com/logser13/opencode-multidevice-sync/issues"
   },
   "keywords": [
     "opencode",
     "opencode-plugin",
     "sync",
+    "multi-device",
+    "session-sync",
     "config-sync",
-    "dotfiles",
+    "backup",
+    "sqlite",
     "github",
     "cli"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "main": "./dist/plugin/index.js",
   "types": "./dist/plugin/index.d.ts",
@@ -39,13 +42,17 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "opencode-sync": "./dist/cli/index.js"
+    "opencode-multidevice-sync": "./dist/cli/index.js",
+    "omds": "./dist/cli/index.js"
   },
   "files": [
     "dist",
     "README.md",
-    "README.zh-CN.md",
-    "LICENSE"
+    "README.ru.md",
+    "LICENSE",
+    "NOTICE",
+    "docs/*.md",
+    "examples/*.jsonc"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -55,13 +62,20 @@
     "lint": "biome check src tests",
     "lint:fix": "biome check --write src tests",
     "typecheck": "tsc --noEmit",
-    "check": "npm run lint && npm run typecheck && npm run test",
-    "prepublishOnly": "npm run build"
+    "check": "npm run lint && npm run typecheck && npm run build && npm run test",
+    "prepublishOnly": "npm run check && npm run build",
+    "test:regressions": "vitest run tests/regressions.test.ts",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.11",
+    "vite": "^6.4.3"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.30"
   }
 }
