@@ -31,12 +31,13 @@ describe("packaged CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("doctor");
     expect(result.stdout).toContain("backup");
+    expect(result.stdout).toContain("sessions locations");
     expect(result.stdout).not.toContain("$paint");
   });
   it("has an explicit package version", () => {
     const r = cli(["--version"]);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("0.1.0");
+    expect(r.stdout.trim()).toBe("0.1.1");
   });
   it("doctor exits nonzero when no repository is configured", () => {
     const r = cli(["doctor", "--json"]);

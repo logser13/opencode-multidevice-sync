@@ -1,4 +1,5 @@
 export * from "./backup.js";
+export * from "./desktop.js";
 export * from "./health.js";
 export * from "./fsx.js";
 export * from "./git.js";

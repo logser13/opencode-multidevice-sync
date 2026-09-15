@@ -9,12 +9,13 @@ import {
   listDatabaseBackups,
   restoreDatabaseBackup,
 } from "../core/backup.js";
+import { assessSessionVisibility, readDesktopState } from "../core/desktop.js";
 import { git } from "../core/git.js";
 import { assertPrivateRemote } from "../core/guard.js";
 import { checkDatabaseHealth, healthProblems } from "../core/health.js";
 import { withSyncLock } from "../core/lock.js";
 import { getDatabasePath, getRoots } from "../core/paths.js";
-import { listSessions } from "../core/sessions.js";
+import { listSessionLocations, listSessions } from "../core/sessions.js";
 import { repoUrl } from "../core/settings.js";
 import {
   OVERRIDES_TEMPLATE,
@@ -92,6 +93,28 @@ async function confirm(question: string, lines: string[]): Promise<boolean> {
   return answer.trim().toLowerCase() === "yes";
 }
 
+function renderSessionLocations(locations: Awaited<ReturnType<typeof listSessionLocations>>): void {
+  for (const location of locations) {
+    const child = location.childSessions ? ` · ${location.childSessions} child` : "";
+    detail(`${location.rootSessions} chat(s)${child} · ${location.directory}`);
+  }
+}
+
+async function reportVisibility(roots: ReturnType<typeof getRoots>): Promise<void> {
+  if (!(await sqliteAvailable())) return;
+  const locations = await listSessionLocations(getDatabasePath(roots));
+  if (!locations.length) return;
+  heading("Session locations");
+  renderSessionLocations(locations);
+  const desktop = readDesktopState();
+  const visibility = assessSessionVisibility(locations, desktop);
+  if (desktop.activeDirectory) keyValue("desktop project", desktop.activeDirectory);
+  if (visibility.warning) {
+    warn(visibility.warning);
+    detail("Open one of the session directories in OpenCode Desktop to make those chats visible.");
+  }
+}
+
 // ── Commands ────────────────────────────────────────────────────────────────
 
 async function runSync(action: "push" | "pull", args: Args): Promise<void> {
@@ -134,6 +157,8 @@ async function runSync(action: "push" | "pull", args: Args): Promise<void> {
       if (result.sessions.skipped) bits.push(`${result.sessions.skipped} skipped`);
       if (bits.length > 0) detail(`Sessions: ${bits.join(", ")}`);
     }
+
+    if (action === "pull" && result.sessions?.imported !== undefined) await reportVisibility(roots);
 
     outcome(dryRun ? `${result.message} (dry run)` : result.message, result.changed);
     if (result.restartRequired && result.changed) {
@@ -241,6 +266,24 @@ async function runSessions(args: Args): Promise<void> {
   const roots = getRoots();
   const settings = loadSettings(roots.config);
 
+  if (sub === "locations") {
+    banner("session locations");
+    if (!(await sqliteAvailable())) {
+      fail("No SQLite driver available. Use Node 22.13+ or run under Bun.");
+      write();
+      return;
+    }
+    const locations = await listSessionLocations(getDatabasePath(roots));
+    if (!locations.length) info("No sessions found.");
+    else renderSessionLocations(locations);
+    const desktop = readDesktopState();
+    const visibility = assessSessionVisibility(locations, desktop);
+    if (desktop.activeDirectory) keyValue("desktop project", desktop.activeDirectory);
+    if (visibility.warning) warn(visibility.warning);
+    write();
+    return;
+  }
+
   if (sub === "list") {
     banner("sessions");
     if (!(await sqliteAvailable())) {
@@ -303,14 +346,21 @@ async function runDoctor(args: Args): Promise<void> {
   const settings = loadSettings(roots.config);
   const remote = repoUrl(settings);
   const issues: string[] = [];
+  const warnings: string[] = [];
   const database = getDatabasePath(roots);
   let health: Awaited<ReturnType<typeof checkDatabaseHealth>> | undefined;
+  let locations: Awaited<ReturnType<typeof listSessionLocations>> = [];
   try {
     health = await checkDatabaseHealth(database);
     if (settings.sessions.enabled && !health.ok) issues.push(...healthProblems(health));
+    if (health.exists) locations = await listSessionLocations(database);
   } catch (error) {
     issues.push((error as Error).message);
   }
+  const desktop = readDesktopState();
+  const visibility = assessSessionVisibility(locations, desktop);
+  if (visibility.warning) warnings.push(visibility.warning);
+  if (desktop.error) warnings.push(`Cannot read OpenCode Desktop state: ${desktop.error}`);
   if (!remote) issues.push("Sync repository is not configured");
   else {
     const reachable = git(["ls-remote", remote, "HEAD"], { cwd: roots.config });
@@ -323,10 +373,14 @@ async function runDoctor(args: Args): Promise<void> {
   }
   const report = {
     package: "opencode-multidevice-sync",
-    version: "0.1.0",
+    version: "0.1.1",
     machine: settings.machineAlias ?? "auto",
     database: health,
     sessionSync: settings.sessions.enabled,
+    sessionLocations: locations,
+    desktop,
+    visibility,
+    warnings,
     backupBeforeImport: settings.sessions.backupBeforeImport,
     credentialsSync: settings.includeCredentials,
     backups: listDatabaseBackups().length,
@@ -344,6 +398,14 @@ async function runDoctor(args: Args): Promise<void> {
     keyValue("parts", String(health?.parts ?? 0));
     keyValue("database integrity", health?.ok ? "OK" : "NOT OK");
     keyValue("backups", String(report.backups));
+    if (locations.length) {
+      heading("Session locations");
+      renderSessionLocations(locations);
+    }
+    if (desktop.activeDirectory) keyValue("desktop project", desktop.activeDirectory);
+    for (const message of warnings) warn(message);
+    if (visibility.mismatch)
+      detail("Open one of the session directories in OpenCode Desktop to see the synced chats.");
     if (report.ok) ok("Preflight checks passed");
     else for (const issue of issues) fail(issue);
     info(report.note);
@@ -447,6 +509,7 @@ function runHelp(): void {
 
   heading("Sessions");
   command("sessions list", "Show recent sessions and their ids");
+  command("sessions locations", "Show which project directories contain synced chats");
   command("sessions enable | disable", "Turn selective session sync on or off");
   command("sessions include <id>", "Always sync a session, ignoring the time window");
   command("sessions exclude <id>", "Never sync a session");
@@ -482,7 +545,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.flags.has("version")) {
-    console.log("0.1.0");
+    console.log("0.1.1");
     return;
   }
   switch (args.command) {

@@ -26,6 +26,10 @@ Dry-run uses a disposable copy and does not update the original Git worktree or 
 
 The lock coordinates processes on one computer only. Use one active device. Git rejects conflicting branch updates, but there is no distributed ownership lease or safe simultaneous editing guarantee. Auto-push waits for startup pull and reports errors; it is not a background system service and cannot finish after the application is terminated.
 
+## Desktop state
+
+OpenCode Desktop UI state is machine-local and is not synchronized. OMDS 0.1.1 may read `lastProject` on a best-effort basis to explain hidden imported chats, but it does not mutate Desktop state. Session rows remain authoritative; visibility is a UI/project-context concern.
+
 ## Compatibility
 
-The initial target is OpenCode 1.18.30 on Windows with Node 22.13+ or 24. Node and OS combinations covered by CI are listed in the workflow. Real Desktop behavior and new OpenCode schemas require separate acceptance testing. Passing tests is not a guarantee against every form of data loss.
+The current SDK target is OpenCode 1.18.31; the 1.18.30 session schema remains covered by regression tests. Windows is the primary acceptance platform, with Node 22/24 covered by CI. Node and OS combinations covered by CI are listed in the workflow. Real Desktop behavior and new OpenCode schemas require separate acceptance testing. Passing tests is not a guarantee against every form of data loss.

@@ -1,5 +1,13 @@
 # Multidevice Sync changelog
 
+## 0.1.1 - Desktop visibility diagnostics
+
+- Added `omds sessions locations` with root/child counts grouped by project directory.
+- `omds doctor` reports session directories and best-effort Desktop `lastProject` mismatches without changing UI state.
+- `omds pull` prints session locations after session processing.
+- Updated `@opencode-ai/plugin` to 1.18.31 while retaining regression coverage for the 1.18.30 database schema.
+- No session shard format or destructive import semantics changed in this patch.
+
 ## 0.1.0 - early preview
 
 Independent fork of upstream 3.0.1. Non-destructive batch import, canonical exports, local project preservation, verified backups, guarded restore, content-baseline conflicts, path mappings, isolated dry-run and doctor. See docs/SAFETY.md and docs/ROADMAP.md for limits.

@@ -18,6 +18,10 @@ Do not migrate both devices blindly. This is an early preview. Test with isolate
 
 The library supports explicit `roots`. CLI isolation variables are `SYNC_CONFIG_ROOT`, `SYNC_DATA_ROOT`, `SYNC_STATE_ROOT`, `SYNC_AGENTS_ROOT`, and `SYNC_CACHE_ROOT`. Use a LOCAL disposable Git remote for automated tests and keep secrets out of fixtures.
 
+## Desktop visibility
+
+After importing sessions, make sure OpenCode Desktop is opened in the directory reported by `omds sessions locations`. Desktop filters the visible session list by its active project directory. `omds doctor` reports a best-effort mismatch with Desktop `lastProject`; the tool never edits that internal UI state automatically.
+
 ## Paths
 
 In `sessions.pathMappings`, `from` is the canonical shared path and `to` is this machine's local path. Import converts from-to; export converts back. Keep mappings one-to-one. The synthetic `global` project must already exist locally and is never overwritten from a shard.

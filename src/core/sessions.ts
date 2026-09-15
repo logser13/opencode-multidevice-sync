@@ -62,6 +62,14 @@ export interface SessionRecord {
   projectId: string;
 }
 
+export interface SessionLocation {
+  directory: string;
+  totalSessions: number;
+  rootSessions: number;
+  childSessions: number;
+  latestUpdated: number;
+}
+
 export interface SessionShard {
   formatVersion: 1;
   session: Record<string, unknown>;
@@ -568,6 +576,33 @@ export async function importSessions(
     return result;
   } finally {
     if (transaction) db.exec("ROLLBACK");
+    db.close();
+  }
+}
+
+export async function listSessionLocations(databaseFile: string): Promise<SessionLocation[]> {
+  if (!fs.existsSync(databaseFile)) return [];
+  const db = await openDatabase(databaseFile, { readOnly: true });
+  try {
+    const hasParent = tableColumns(db, "session").includes("parent_id");
+    const rootExpr = hasParent ? "SUM(CASE WHEN parent_id IS NULL THEN 1 ELSE 0 END)" : "COUNT(*)";
+    const rows = db
+      .prepare(
+        `SELECT directory, COUNT(*) AS total, ${rootExpr} AS roots, MAX(time_updated) AS latest\n      FROM session GROUP BY directory ORDER BY roots DESC, latest DESC`,
+      )
+      .all() as any[];
+    return rows.map((row) => {
+      const totalSessions = Number(row.total ?? 0);
+      const rootSessions = Number(row.roots ?? totalSessions);
+      return {
+        directory: String(row.directory ?? ""),
+        totalSessions,
+        rootSessions,
+        childSessions: Math.max(0, totalSessions - rootSessions),
+        latestUpdated: Number(row.latest ?? 0),
+      };
+    });
+  } finally {
     db.close();
   }
 }

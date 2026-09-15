@@ -1,5 +1,11 @@
 # Roadmap
 
+## 0.1.1
+
+- Session-directory visibility diagnostics for OpenCode Desktop.
+- Compatibility build against `@opencode-ai/plugin` 1.18.31.
+- No automatic mutation of OpenCode Desktop internal project state.
+
 ## Included in the 0.1.0 preview
 
 - Source-level fixes for upstream reports #2, #3 and #4.
