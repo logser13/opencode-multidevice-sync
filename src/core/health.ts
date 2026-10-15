@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { sessionTable } from "./database-generation.js";
 import { type SqliteDatabase, existingTables, openDatabase, tableColumns } from "./sqlite.js";
 export interface DatabaseHealth {
   exists: boolean;
@@ -20,6 +21,7 @@ const REQUIRED: Record<string, string[]> = {
   part: ["id", "session_id", "message_id"],
 };
 export function inspectDatabase(db: SqliteDatabase): DatabaseHealth {
+  if (sessionTable(db) === "session_v2") return inspectV2(db);
   const tables = new Set(existingTables(db, Object.keys(REQUIRED)));
   const missingTables = Object.keys(REQUIRED).filter((t) => !tables.has(t));
   const missingColumns = Object.entries(REQUIRED).flatMap(([t, cols]) =>
@@ -59,6 +61,47 @@ export function inspectDatabase(db: SqliteDatabase): DatabaseHealth {
     sessions,
     messages,
     parts,
+  };
+}
+function inspectV2(db: SqliteDatabase): DatabaseHealth {
+  const required = {
+    project: ["id"],
+    session_v2: ["id", "project_id", "directory", "time_updated"],
+    session_message: ["id", "session_id", "seq", "data"],
+    event_sequence: ["aggregate_id", "seq"],
+  };
+  const tables = new Set(existingTables(db, Object.keys(required)));
+  const missingTables = Object.keys(required).filter((t) => !tables.has(t));
+  const missingColumns = Object.entries(required).flatMap(([t, cols]) =>
+    tables.has(t)
+      ? cols.filter((c) => !tableColumns(db, t).includes(c)).map((c) => `${t}.${c}`)
+      : [],
+  );
+  const quickCheck = db
+    .prepare("PRAGMA quick_check")
+    .all()
+    .map((row) => String(Object.values(row)[0]))
+    .join("; ");
+  const foreignKeyViolations = db.prepare("PRAGMA foreign_key_check").all().length;
+  const n = (sql: string) => Number(db.prepare(sql).all()[0]?.n ?? 0);
+  const valid = !missingTables.length && !missingColumns.length;
+  const orphanMessages = valid
+    ? n(
+        "SELECT COUNT(*) AS n FROM session_message m LEFT JOIN session_v2 s ON s.id=m.session_id WHERE s.id IS NULL",
+      )
+    : 0;
+  return {
+    exists: true,
+    ok: valid && quickCheck === "ok" && !foreignKeyViolations && !orphanMessages,
+    missingTables,
+    missingColumns,
+    quickCheck,
+    foreignKeyViolations,
+    orphanMessages,
+    orphanParts: 0,
+    sessions: tables.has("session_v2") ? n("SELECT COUNT(*) AS n FROM session_v2") : 0,
+    messages: tables.has("session_message") ? n("SELECT COUNT(*) AS n FROM session_message") : 0,
+    parts: 0,
   };
 }
 export async function checkDatabaseHealth(file: string): Promise<DatabaseHealth> {

@@ -3,10 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { createDatabaseBackup } from "./backup.js";
+import { isV2Database, sessionTable } from "./database-generation.js";
 import { ensureDir } from "./fsx.js";
 import { healthProblems, inspectDatabase } from "./health.js";
 import { SESSIONS_DIR } from "./paths.js";
 import type { Reporter } from "./reporter.js";
+import { acknowledgeV2, exportV2, importV2 } from "./sessions-v2.js";
 import type { SessionSettings } from "./settings.js";
 import { type SqliteDatabase, existingTables, openDatabase, tableColumns } from "./sqlite.js";
 
@@ -84,6 +86,8 @@ export interface SelectOptions extends SessionSettings {
 }
 
 export interface ExportResult {
+  /** V2 snapshot receipts, captured before network operations or further local edits. */
+  exportedHashes?: Record<string, string>;
   written: string[];
   skippedTooLarge: { id: string; title: string; bytes: number }[];
   considered: number;
@@ -101,6 +105,7 @@ export interface ImportResult {
 }
 
 export interface ImportOptions {
+  offlineConfirmed?: boolean;
   dryRun?: boolean;
   preferRemote?: boolean;
   backupBeforeImport?: boolean;
@@ -135,7 +140,7 @@ export function selectSessions(db: SqliteDatabase, options: SelectOptions): Sess
   const rows = readRows(
     db,
     `SELECT id, title, directory, time_updated, time_created, project_id
-       FROM session
+       FROM ${sessionTable(db)}
       ORDER BY time_updated DESC`,
     [],
   ) as any[];
@@ -320,6 +325,7 @@ export async function exportSessions(
   options: SelectOptions,
   reporter: Reporter,
 ): Promise<ExportResult> {
+  if (await isV2Database(file)) return exportV2(file, repo, options, reporter);
   const result: ExportResult = { written: [], skippedTooLarge: [], considered: 0, conflicts: [] };
   if (!fs.existsSync(file)) return result;
   const bases = readBases(file);
@@ -370,7 +376,9 @@ export async function acknowledgeExport(
   file: string,
   repo: string,
   mappings: Mapping[] = [],
+  exportedHashes?: Record<string, string>,
 ): Promise<void> {
+  if (await isV2Database(file)) return acknowledgeV2(file, repo, exportedHashes);
   if (!fs.existsSync(file)) return;
   const bases = readBases(file);
   const db = await openDatabase(file, { readOnly: true });
@@ -422,6 +430,7 @@ export async function importSessions(
   reporter: Reporter,
   options: ImportOptions = {},
 ): Promise<ImportResult> {
+  if (await isV2Database(file)) return importV2(file, repo, reporter, options);
   const result: ImportResult = {
     imported: 0,
     skippedOlder: 0,
@@ -584,11 +593,12 @@ export async function listSessionLocations(databaseFile: string): Promise<Sessio
   if (!fs.existsSync(databaseFile)) return [];
   const db = await openDatabase(databaseFile, { readOnly: true });
   try {
-    const hasParent = tableColumns(db, "session").includes("parent_id");
+    const table = sessionTable(db);
+    const hasParent = tableColumns(db, table).includes("parent_id");
     const rootExpr = hasParent ? "SUM(CASE WHEN parent_id IS NULL THEN 1 ELSE 0 END)" : "COUNT(*)";
     const rows = db
       .prepare(
-        `SELECT directory, COUNT(*) AS total, ${rootExpr} AS roots, MAX(time_updated) AS latest\n      FROM session GROUP BY directory ORDER BY roots DESC, latest DESC`,
+        `SELECT directory, COUNT(*) AS total, ${rootExpr} AS roots, MAX(time_updated) AS latest\n      FROM ${table} GROUP BY directory ORDER BY roots DESC, latest DESC`,
       )
       .all() as any[];
     return rows.map((row) => {
@@ -615,7 +625,7 @@ export async function listSessions(databaseFile: string, limit: number): Promise
     const rows = readRows(
       db,
       `SELECT id, title, directory, time_updated, time_created, project_id
-         FROM session ORDER BY time_updated DESC LIMIT ?`,
+         FROM ${sessionTable(db)} ORDER BY time_updated DESC LIMIT ?`,
       [limit],
     ) as any[];
     return rows.map((row) => ({

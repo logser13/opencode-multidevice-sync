@@ -1,5 +1,13 @@
 # Multidevice Sync changelog
 
+## 0.2.0-v2.0 - 2026-10-15 isolated V2 preview
+
+- Added strict versioned V2 session transport pinned to OpenCode 2.0.29, with events, sequence watermarks, instruction blobs, Windows project mapping and non-destructive whole-batch imports.
+- Added offline-only V2 pull, native V2 plugin loading/tool/idle subscription and cleanup, while retaining the V1 server entrypoint and adapter.
+- Protected runtime service registrations, custom database roots and V2 baselines; ignored stale V1 Desktop state for V2 diagnostics.
+- Added malformed-data, rollback, conflict, backup/restore, receipt race and native Windows A -> B -> A acceptance coverage. Historical unfinished messages remain refused; see docs/V2-COMPATIBILITY.md.
+- Built locally only. No npm publication, GitHub push, global install or production migration.
+
 ## 0.1.1 - Desktop visibility diagnostics
 
 - Added `omds sessions locations` with root/child counts grouped by project directory.

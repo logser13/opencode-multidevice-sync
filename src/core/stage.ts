@@ -47,7 +47,7 @@ const DATA_FILES = ["sync-state.json"];
  */
 const DATA_PATHS = ["storage/project", "storage/migration"];
 /** State files that describe this machine's current UI, not its configuration. */
-const MACHINE_STATE_FILES = new Set(["session.json"]);
+const MACHINE_STATE_FILES = new Set(["session.json", "service.json"]);
 const MACHINE_STATE_DIRS = new Set(["locks"]);
 
 const SKILL_LOCK = ".skill-lock.json";
@@ -306,7 +306,14 @@ export function prunePluginCache(configRoot: string, cacheRoot: string): number 
     return 0;
   }
 
-  const enabled = new Set<string>((config?.plugin ?? []).map(pluginSpecToName));
+  const specs = [...(config?.plugin ?? []), ...(config?.plugins ?? [])];
+  const enabled = new Set<string>(
+    specs.map((spec: any) =>
+      pluginSpecToName(
+        typeof spec === "string" ? spec : Array.isArray(spec) ? spec[0] : spec.package,
+      ),
+    ),
+  );
   const pkg = readJson(cachePackage);
   if (!pkg) return 0;
 

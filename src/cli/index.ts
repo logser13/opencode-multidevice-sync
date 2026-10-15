@@ -9,6 +9,7 @@ import {
   listDatabaseBackups,
   restoreDatabaseBackup,
 } from "../core/backup.js";
+import { isV2Database } from "../core/database-generation.js";
 import { assessSessionVisibility, readDesktopState } from "../core/desktop.js";
 import { git } from "../core/git.js";
 import { assertPrivateRemote } from "../core/guard.js";
@@ -106,7 +107,9 @@ async function reportVisibility(roots: ReturnType<typeof getRoots>): Promise<voi
   if (!locations.length) return;
   heading("Session locations");
   renderSessionLocations(locations);
-  const desktop = readDesktopState();
+  const desktop = readDesktopState({
+    generation: (await isV2Database(getDatabasePath(roots))) ? "v2" : "v1",
+  });
   const visibility = assessSessionVisibility(locations, desktop);
   if (desktop.activeDirectory) keyValue("desktop project", desktop.activeDirectory);
   if (visibility.warning) {
@@ -146,7 +149,7 @@ async function runSync(action: "push" | "pull", args: Args): Promise<void> {
     const result = await withSyncLock(roots.config, { waitMs: LOCK_WAIT_MS }, () =>
       action === "push"
         ? push({ force, dryRun, reporter, roots })
-        : pull({ force, dryRun, reporter, roots }),
+        : pull({ force, dryRun, reporter, roots, offlineConfirmed: args.flags.has("offline") }),
     );
     spinner.stop();
 
@@ -276,7 +279,9 @@ async function runSessions(args: Args): Promise<void> {
     const locations = await listSessionLocations(getDatabasePath(roots));
     if (!locations.length) info("No sessions found.");
     else renderSessionLocations(locations);
-    const desktop = readDesktopState();
+    const desktop = readDesktopState({
+      generation: (await isV2Database(getDatabasePath(roots))) ? "v2" : "v1",
+    });
     const visibility = assessSessionVisibility(locations, desktop);
     if (desktop.activeDirectory) keyValue("desktop project", desktop.activeDirectory);
     if (visibility.warning) warn(visibility.warning);
@@ -357,7 +362,7 @@ async function runDoctor(args: Args): Promise<void> {
   } catch (error) {
     issues.push((error as Error).message);
   }
-  const desktop = readDesktopState();
+  const desktop = readDesktopState({ generation: (await isV2Database(database)) ? "v2" : "v1" });
   const visibility = assessSessionVisibility(locations, desktop);
   if (visibility.warning) warnings.push(visibility.warning);
   if (desktop.error) warnings.push(`Cannot read OpenCode Desktop state: ${desktop.error}`);
@@ -373,7 +378,7 @@ async function runDoctor(args: Args): Promise<void> {
   }
   const report = {
     package: "opencode-multidevice-sync",
-    version: "0.1.1",
+    version: "0.2.0-v2.0",
     machine: settings.machineAlias ?? "auto",
     database: health,
     sessionSync: settings.sessions.enabled,
@@ -504,7 +509,7 @@ function runHelp(): void {
 
   heading("Sync");
   command("push", "Send this machine's configuration");
-  command("pull", "Apply the shared configuration");
+  command("pull [--offline]", "Apply shared configuration; V2 sessions require stopped OpenCode");
   command("status", "Show what is in sync and what is not");
 
   heading("Sessions");
@@ -545,7 +550,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.flags.has("version")) {
-    console.log("0.1.1");
+    console.log("0.2.0-v2.0");
     return;
   }
   switch (args.command) {

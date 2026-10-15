@@ -37,7 +37,7 @@ describe("packaged CLI", () => {
   it("has an explicit package version", () => {
     const r = cli(["--version"]);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("0.1.1");
+    expect(r.stdout.trim()).toBe("0.2.0-v2.0");
   });
   it("doctor exits nonzero when no repository is configured", () => {
     const r = cli(["doctor", "--json"]);

@@ -108,8 +108,9 @@ export async function restoreDatabaseBackup(
     assertNoJournals();
     fs.renameSync(temp, file);
     // A restored snapshot must not inherit baselines from a newer database.
-    if (fs.existsSync(file + ".omds-bases.json"))
-      fs.renameSync(file + ".omds-bases.json", file + `.omds-bases-before-${randomUUID()}.json`);
+    for (const suffix of [".omds-bases.json", ".omds-v2-bases.json"])
+      if (fs.existsSync(file + suffix))
+        fs.renameSync(file + suffix, file + `${suffix}.before-${randomUUID()}`);
     return safety;
   } finally {
     fs.rmSync(temp, { force: true });

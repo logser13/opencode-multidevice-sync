@@ -9,6 +9,8 @@ import path from "node:path";
  * machine.
  */
 export interface Roots {
+  /** Explicit host DB override, captured with the roots so test copies stay isolated. */
+  database?: string;
   /** `~/.config/opencode` — also the git worktree for the sync repo. */
   config: string;
   /** `~/.local/share/opencode` — auth, account, sqlite database. */
@@ -29,6 +31,7 @@ function xdg(envVar: string, ...fallback: string[]): string {
 
 export function getConfigRoot(): string {
   if (process.env.SYNC_CONFIG_ROOT) return process.env.SYNC_CONFIG_ROOT;
+  if (process.env.OPENCODE_CONFIG_DIR) return process.env.OPENCODE_CONFIG_DIR;
   return path.join(xdg("XDG_CONFIG_HOME", ".config"), "opencode");
 }
 
@@ -59,12 +62,13 @@ export function getRoots(): Roots {
     state: getStateRoot(),
     agents: getAgentsRoot(),
     cache: getCacheRoot(),
+    ...(process.env.OPENCODE_DB ? { database: path.resolve(process.env.OPENCODE_DB) } : {}),
   };
 }
 
 /** Path of the OpenCode SQLite database that holds all sessions. */
 export function getDatabasePath(roots: Roots = getRoots()): string {
-  return path.join(roots.data, "opencode.db");
+  return roots.database ?? path.join(roots.data, "opencode.db");
 }
 
 /** Directory inside the sync repo where session shards are written. */

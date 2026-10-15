@@ -27,6 +27,8 @@ export interface SqliteDatabase {
 
 export interface OpenOptions {
   readOnly?: boolean;
+  /** Only for a closed database with no WAL/journal. Prevent SQLite creating journals on read. */
+  immutable?: boolean;
 }
 
 /**
@@ -84,10 +86,17 @@ export async function openDatabase(
   options: OpenOptions = {},
 ): Promise<SqliteDatabase> {
   const driver = await detectDriver();
+  if (options.immutable && !options.readOnly)
+    throw new Error("Immutable SQLite access must be read-only");
+  let source = file;
+  if (options.immutable) {
+    const { pathToFileURL } = await import("node:url");
+    source = pathToFileURL(file).href + "?immutable=1";
+  }
 
   if (driver === "bun") {
     const { Database } = await importBunSqlite();
-    const db = new Database(file, options.readOnly ? { readonly: true } : { create: true });
+    const db = new Database(source, options.readOnly ? { readonly: true } : { create: true });
     db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     return {
       prepare: (sql: string) => {
@@ -104,7 +113,7 @@ export async function openDatabase(
 
   if (driver === "node") {
     const { DatabaseSync } = (await import("node:sqlite")) as any;
-    const db = new DatabaseSync(file, options.readOnly ? { readOnly: true } : {});
+    const db = new DatabaseSync(source, options.readOnly ? { readOnly: true } : {});
     db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     return {
       prepare: (sql: string) => {
