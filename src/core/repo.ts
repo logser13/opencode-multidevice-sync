@@ -18,6 +18,10 @@ export const DEFAULT_GITIGNORE = `# opencode-github-sync — machine-local, neve
 ${SETTINGS_FILE}
 ${OVERRIDES_FILE}
 .opencode-sync.lock
+service.json
+_state/service.json
+_data/opencode.db.omds-bases.json
+_data/opencode.db.omds-v2-bases.json
 
 # Runtime / generated
 node_modules/
@@ -78,6 +82,10 @@ ${SESSIONS_DIR}/*.json.gz binary
  * delete a user's local database or tool output.
  */
 export const LOCAL_RUNTIME_PATHS = [
+  "service.json",
+  `${STATE_DIR}/service.json`,
+  `${DATA_DIR}/opencode.db.omds-bases.json`,
+  `${DATA_DIR}/opencode.db.omds-v2-bases.json`,
   `${DATA_DIR}/opencode.db`,
   `${DATA_DIR}/opencode.db-shm`,
   `${DATA_DIR}/opencode.db-wal`,
@@ -97,6 +105,13 @@ export function isLocalRuntimePath(candidate: string): boolean {
 
 export function excludePathspecs(): string[] {
   return LOCAL_RUNTIME_PATHS.map((p) => `:(exclude)${p}`);
+}
+export function assertNoRuntimeTree(root: string, ref: string): void {
+  const tree = git(["ls-tree", "-r", "--name-only", "-z", ref], { cwd: root });
+  if (!tree.ok) throw toGitError("Inspect remote runtime files", tree);
+  const unsafe = tree.stdout.split("\0").filter(Boolean).find(isLocalRuntimePath);
+  if (unsafe)
+    throw new Error(`Remote tracks machine-local runtime file ${unsafe}; refusing checkout`);
 }
 
 /** Unstage runtime paths in a single git call — subprocesses are slow on Windows. */
@@ -163,6 +178,7 @@ export function initRepo(options: EnsureRepoOptions): RepoState {
 
   const fetched = git(["fetch", "origin", branch], { cwd: root });
   if (fetched.ok && git(["rev-parse", `origin/${branch}`], { cwd: root }).ok) {
+    assertNoRuntimeTree(root, `origin/${branch}`);
     git(["reset", "--hard", `origin/${branch}`], { cwd: root });
     git(["branch", `--set-upstream-to=origin/${branch}`, branch], { cwd: root });
     return "adopted";

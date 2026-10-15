@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createDatabaseBackup } from "./backup.js";
 import { git } from "./git.js";
-import { type Roots, getRoots } from "./paths.js";
+import { type Roots, getDatabasePath, getRoots } from "./paths.js";
 import { loadSettings } from "./settings.js";
 import type { SyncOptions, SyncResult } from "./sync.js";
 export async function previewSync(
@@ -47,7 +47,8 @@ export async function previewSync(
         },
       });
     }
-    const database = path.join(roots.data, "opencode.db");
+    const database = getDatabasePath(roots);
+    isolated.database = path.join(isolated.data, "opencode.db");
     if (settings.sessions.enabled && fs.existsSync(database)) {
       const snapshot = await createDatabaseBackup(database, path.join(temp, "snapshot"), 1);
       fs.copyFileSync(snapshot.path, path.join(isolated.data, "opencode.db"));

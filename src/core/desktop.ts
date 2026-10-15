@@ -11,6 +11,7 @@ export interface DesktopState {
 }
 
 export interface DesktopStateOptions {
+  generation?: "v1" | "v2";
   platform?: NodeJS.Platform;
   home?: string;
   appData?: string;
@@ -48,6 +49,7 @@ function parseEmbedded(value: unknown): Record<string, unknown> | undefined {
 }
 
 export function readDesktopState(options: DesktopStateOptions = {}): DesktopState {
+  if (options.generation === "v2") return { knownProjects: [], readable: false };
   const stateFile = candidateStateFile(options);
   if (!fs.existsSync(stateFile)) return { stateFile, knownProjects: [], readable: false };
   try {

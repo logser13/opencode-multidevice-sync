@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import { tool } from "@opencode-ai/plugin";
+import type { Plugin } from "@opencode/plugin";
 import { withSyncLock } from "../core/lock.js";
 import { getRoots } from "../core/paths.js";
 import { CollectingReporter } from "../core/reporter.js";
 import { loadSettings, repoUrl, settingsPath } from "../core/settings.js";
 import { pull, push, status } from "../core/sync.js";
+import { setupV2 } from "./v2.js";
 const startups = new Map<string, Promise<boolean>>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 async function notify(client: any, message: string, failed = false) {
@@ -19,7 +21,7 @@ async function notify(client: any, message: string, failed = false) {
     });
   } catch {}
 }
-export default async function OpencodeMultideviceSync(ctx: { client?: any; directory?: string }) {
+async function OpencodeMultideviceSync(ctx: { client?: any; directory?: string }) {
   const roots = getRoots();
   const client = ctx.client;
   if (!fs.existsSync(settingsPath(roots.config)) || !repoUrl(loadSettings(roots.config))) return {};
@@ -86,3 +88,11 @@ export default async function OpencodeMultideviceSync(ctx: { client?: any; direc
     },
   };
 }
+
+// Plugin.define is an identity function in 2.0.29. A structural entrypoint
+// avoids adding the V2 runtime to V1's dependency graph. V1 >= 1.18.29 calls server.
+export default {
+  id: "opencode-multidevice-sync",
+  setup: setupV2,
+  server: OpencodeMultideviceSync,
+} satisfies Plugin.Plugin & { server: typeof OpencodeMultideviceSync };

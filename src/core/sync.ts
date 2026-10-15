@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { assertOfflineV2, isV2Database } from "./database-generation.js";
 import {
   type GitResult,
   git,
@@ -15,6 +16,7 @@ import { type Roots, getDatabasePath, getRoots } from "./paths.js";
 import { previewSync } from "./preview.js";
 import {
   LOCAL_RUNTIME_PATHS,
+  assertNoRuntimeTree,
   assertPushLanded,
   assertRemoteReachable,
   ensureRepo,
@@ -43,6 +45,7 @@ import {
 } from "./stage.js";
 
 export interface SyncOptions {
+  offlineConfirmed?: boolean;
   settings?: Settings;
   roots?: Roots;
   reporter?: Reporter;
@@ -77,6 +80,8 @@ class SyncError extends Error {
 }
 
 interface Context {
+  exportedHashes?: Record<string, string>;
+  offlineConfirmed: boolean;
   root: string;
   branch: string;
   remote: string;
@@ -98,6 +103,7 @@ function prepare(options: SyncOptions): Context {
     );
   }
   return {
+    offlineConfirmed: options.offlineConfirmed ?? false,
     root: roots.config,
     branch: repoBranch(settings),
     remote,
@@ -118,6 +124,12 @@ function toChangedFiles(result: GitResult, excludeRuntime: boolean): ChangedFile
 // ── Push ────────────────────────────────────────────────────────────────────
 
 export async function push(options: SyncOptions = {}): Promise<SyncResult> {
+  if (options.offlineConfirmed) {
+    const roots = options.roots ?? getRoots();
+    const settings = options.settings ?? loadSettings(roots.config);
+    if (settings.sessions.enabled && (await isV2Database(getDatabasePath(roots))))
+      await assertOfflineV2(getDatabasePath(roots), true);
+  }
   if (options.dryRun) return previewSync("push", options, pushImpl);
   return pushImpl(options);
 }
@@ -138,7 +150,12 @@ async function pushImpl(options: SyncOptions): Promise<SyncResult> {
   try {
     const result = await runPush(ctx);
     if (!ctx.dryRun && ctx.settings.sessions.enabled)
-      await acknowledgeExport(getDatabasePath(ctx.roots), root, ctx.settings.sessions.pathMappings);
+      await acknowledgeExport(
+        getDatabasePath(ctx.roots),
+        root,
+        ctx.settings.sessions.pathMappings,
+        ctx.exportedHashes,
+      );
     return result;
   } finally {
     // Staging rewrites the on-disk config into its shareable form. Whatever
@@ -255,6 +272,9 @@ export async function pull(options: SyncOptions = {}): Promise<SyncResult> {
   return pullImpl(options);
 }
 async function pullImpl(options: SyncOptions): Promise<SyncResult> {
+  const checkedRoots = options.roots ?? getRoots();
+  if (await isV2Database(getDatabasePath(checkedRoots)))
+    await assertOfflineV2(getDatabasePath(checkedRoots), options.offlineConfirmed);
   const ctx = prepare(options);
   assertPrivateRemote(ctx.remote, ctx.settings);
   try {
@@ -301,6 +321,7 @@ async function pullInternal(options: SyncOptions): Promise<SyncResult> {
   reporter.step("Fetching from GitHub");
   const fetched = git(["fetch", "origin", branch], { cwd: root });
   if (!fetched.ok) throw toGitError("Fetch", fetched);
+  assertNoRuntimeTree(root, `origin/${branch}`);
 
   const ahead = countCommits(root, `origin/${branch}..HEAD`);
   if (!force && ahead > 0) {
@@ -464,7 +485,16 @@ async function maybeExportSessions(ctx: Context): Promise<SyncResult["sessions"]
 
   const database = getDatabasePath(ctx.roots);
   ctx.reporter.step("Exporting sessions");
-  const result = await exportSessions(database, ctx.root, ctx.settings.sessions, ctx.reporter);
+  const result = await exportSessions(
+    database,
+    ctx.root,
+    {
+      ...ctx.settings.sessions,
+      offlineConfirmed: ctx.offlineConfirmed,
+    },
+    ctx.reporter,
+  );
+  ctx.exportedHashes = result.exportedHashes;
   if (result.conflicts?.length)
     throw new SyncError(
       `Session export conflicts: ${result.conflicts.join(", ")}. No push was performed.`,
@@ -492,12 +522,10 @@ async function maybeImportSessions(ctx: Context): Promise<SyncResult["sessions"]
   }
 
   ctx.reporter.step("Importing sessions");
-  const result = await importSessions(
-    getDatabasePath(ctx.roots),
-    ctx.root,
-    ctx.reporter,
-    ctx.settings.sessions,
-  );
+  const result = await importSessions(getDatabasePath(ctx.roots), ctx.root, ctx.reporter, {
+    ...ctx.settings.sessions,
+    offlineConfirmed: ctx.offlineConfirmed,
+  });
   for (const failure of result.failed) {
     ctx.reporter.warn(`Could not import ${failure.file}: ${failure.reason}`);
   }

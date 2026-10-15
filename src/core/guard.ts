@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { git } from "./git.js";
+import { isLocalRuntimePath } from "./repo.js";
 import type { Settings } from "./settings.js";
 export function assertPrivateRemote(remote: string, settings: Settings): void {
   if (!settings.sessions.enabled && !settings.includeCredentials) return;
@@ -28,6 +29,8 @@ export function assertSafeTrackedFiles(root: string, settings: Settings): void {
   const files = git(["ls-files", "-z"], { cwd: root });
   if (!files.ok) throw new Error("Cannot inspect staged file list");
   for (const name of files.stdout.split("\0").filter(Boolean)) {
+    if (isLocalRuntimePath(name))
+      throw new Error(`Machine-local runtime file is tracked: ${name}; untrack before syncing`);
     const normalized = name.replace(/\\/g, "/");
     const credential = /(^|\/)(auth|account)\.json$/i.test(normalized);
     if (

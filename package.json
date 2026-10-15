@@ -1,6 +1,6 @@
 {
   "name": "opencode-multidevice-sync",
-  "version": "0.1.1",
+  "version": "0.2.0-v2.1",
   "description": "Reliable multi-device synchronization for OpenCode configuration, sessions, skills and plugins with safety checks, backups and recovery.",
   "type": "module",
   "license": "MIT",
@@ -31,6 +31,7 @@
   "main": "./dist/plugin/index.js",
   "types": "./dist/plugin/index.d.ts",
   "exports": {
+    "./server": "./server.js",
     ".": {
       "types": "./dist/plugin/index.d.ts",
       "default": "./dist/plugin/index.js"
@@ -46,6 +47,7 @@
     "omds": "./dist/cli/index.js"
   },
   "files": [
+    "server.js",
     "dist",
     "README.md",
     "README.ru.md",
@@ -70,6 +72,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@opencode/client": "2.0.29",
+    "@opencode/plugin": "2.0.29",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2",
     "vite": "^6.4.3",
