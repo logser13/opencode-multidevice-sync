@@ -124,6 +124,12 @@ function toChangedFiles(result: GitResult, excludeRuntime: boolean): ChangedFile
 // ── Push ────────────────────────────────────────────────────────────────────
 
 export async function push(options: SyncOptions = {}): Promise<SyncResult> {
+  if (options.offlineConfirmed) {
+    const roots = options.roots ?? getRoots();
+    const settings = options.settings ?? loadSettings(roots.config);
+    if (settings.sessions.enabled && (await isV2Database(getDatabasePath(roots))))
+      await assertOfflineV2(getDatabasePath(roots), true);
+  }
   if (options.dryRun) return previewSync("push", options, pushImpl);
   return pushImpl(options);
 }
@@ -479,7 +485,15 @@ async function maybeExportSessions(ctx: Context): Promise<SyncResult["sessions"]
 
   const database = getDatabasePath(ctx.roots);
   ctx.reporter.step("Exporting sessions");
-  const result = await exportSessions(database, ctx.root, ctx.settings.sessions, ctx.reporter);
+  const result = await exportSessions(
+    database,
+    ctx.root,
+    {
+      ...ctx.settings.sessions,
+      offlineConfirmed: ctx.offlineConfirmed,
+    },
+    ctx.reporter,
+  );
   ctx.exportedHashes = result.exportedHashes;
   if (result.conflicts?.length)
     throw new SyncError(

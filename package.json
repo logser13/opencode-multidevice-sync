@@ -1,6 +1,6 @@
 {
   "name": "opencode-multidevice-sync",
-  "version": "0.2.0-v2.0",
+  "version": "0.2.0-v2.1",
   "description": "Reliable multi-device synchronization for OpenCode configuration, sessions, skills and plugins with safety checks, backups and recovery.",
   "type": "module",
   "license": "MIT",

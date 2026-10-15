@@ -1,6 +1,6 @@
 # OpenCode V2 compatibility preview
 
-Version `0.2.0-v2.0`, based on OMDS `0.1.1` at `0724a2e`. Implemented and tested on Windows with the released OpenCode CLI `2.0.29` on 2026-10-15. This is an isolated preview, not authorization to migrate an existing installation.
+Version `0.2.0-v2.1`, based on OMDS `0.1.1` at `0724a2e` and isolated preview `0.2.0-v2.0` at `f48d0be`. Pinned to the released OpenCode CLI `2.0.29`. This is an isolated preview, not authorization to migrate an existing installation.
 
 ## Supported contract
 
@@ -18,7 +18,7 @@ V2 import is **offline only**: completely stop the applicable OpenCode server an
 
 Do not edit the same conversation on both computers. Use one active computer at a time. Do not reuse a V1 shard repository for V2: cross-generation shards are intentionally rejected. Config files and other plugins still require their own migration review; OMDS does not convert arbitrary V1 configuration, MCP tools or third-party plugin APIs.
 
-Active/suspended/compacting sessions, queued inputs, workspace-bound sessions and unfinished assistant/shell/compaction messages are refused. This includes historical interrupted messages even if a later response completed. No timestamps or history are repaired automatically. The read-only snapshot used for acceptance contained 114 sessions. Four had unfinished historical assistants and were explicitly excluded in the disposable fixture; the remaining 110 plus synthetic parent/child histories were eligible. This restriction blocks recommending a complete production migration of that snapshot.
+Active/suspended/compacting sessions, queued inputs, workspace-bound sessions and running shell/compaction messages remain refused. Default/live export also refuses unfinished assistants. Explicit `omds push --offline` now validates the original database before any preview or Git operation and permits archiving an interrupted assistant unchanged only when embedded tools are terminal (completed/error) and no execution owner exists. No timestamps or history are repaired automatically. The older 0.2.0-v2.0 acceptance excluded four histories; see [the new interrupted-history policy](INTERRUPTED-HISTORY.md) and dedicated acceptance driver for the expanded offline boundary. Same-ID native continuation can finalize an old tail timestamp; use a native fork before that partial record when preserving the exact original is required. Complete production migration remains unproven.
 
 V2 snapshots have a hard input limit of 64 MiB compressed and 128 MiB expanded. The configurable selection/size defaults still apply; acceptance deliberately selected all eligible histories with a larger per-session cap. Excluded or oversized sessions are not deleted remotely. Offline import cannot prove another application will not open the same database immediately afterward, so keep the isolated workflow until a separately approved rollout.
 

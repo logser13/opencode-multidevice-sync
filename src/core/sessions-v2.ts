@@ -115,7 +115,22 @@ function translateRow(row: Row, mappings: Mapping[], fromID: string, toID: strin
   }
   return copy;
 }
-function assertSettled(db: SqliteDatabase, id: string): void {
+function assertHistoryMessages(messages: Row[], offline: boolean): void {
+  for (const row of messages) {
+    const data = JSON.parse(row.data);
+    if (["shell", "compaction"].includes(row.type) && data.status === "running")
+      throw new Error("Running message; wait until settled");
+    if (row.type !== "assistant" || data.time?.completed != null) continue;
+    if (!offline)
+      throw new Error("Running or interrupted assistant; use a verified offline snapshot");
+    if (data.content !== undefined && !Array.isArray(data.content))
+      throw new Error("Invalid interrupted assistant content");
+    for (const content of data.content ?? [])
+      if (content.type === "tool" && !["completed", "error"].includes(content.state?.status))
+        throw new Error("Nonterminal or unknown embedded tool state in interrupted assistant");
+  }
+}
+function assertSettled(db: SqliteDatabase, id: string, offline: boolean): void {
   const session = rows(db, "SELECT * FROM session_v2 WHERE id=?", id)[0];
   if (!session) throw new Error(`Missing V2 session ${id}`);
   if (session.time_suspended !== null || session.time_compacting !== null)
@@ -125,17 +140,19 @@ function assertSettled(db: SqliteDatabase, id: string): void {
   for (const table of ["session_pending", "session_inbox"])
     if (rows(db, `SELECT 1 FROM ${table} WHERE session_id=? LIMIT 1`, id).length)
       throw new Error(`Pending input in ${id}; wait until idle`);
-  for (const row of rows(db, "SELECT type,data FROM session_message WHERE session_id=?", id)) {
-    const data = JSON.parse(row.data);
-    if (
-      (row.type === "assistant" && data.time?.completed == null) ||
-      (["shell", "compaction"].includes(row.type) && data.status === "running")
-    )
-      throw new Error(`Running message in ${id}; wait until settled`);
-  }
+  if (
+    offline &&
+    rows(db, "SELECT 1 FROM event_sequence WHERE aggregate_id=? AND owner_id IS NOT NULL", id)
+      .length
+  )
+    throw new Error(`Execution owner in ${id}; stop OpenCode cleanly`);
+  assertHistoryMessages(
+    rows(db, "SELECT type,data FROM session_message WHERE session_id=?", id),
+    offline,
+  );
 }
-function snapshot(db: SqliteDatabase, id: string, mappings: Mapping[]): Shard {
-  assertSettled(db, id);
+function snapshot(db: SqliteDatabase, id: string, mappings: Mapping[], offline = false): Shard {
+  assertSettled(db, id, offline);
   const original = rows(db, "SELECT * FROM session_v2 WHERE id=?", id)[0]!;
   const project = rows(db, "SELECT * FROM project WHERE id=?", original.project_id)[0];
   if (!project) throw new Error("Missing V2 project");
@@ -263,6 +280,7 @@ function readShard(file: string): Shard {
   if (sequence.length !== 1 || !Number.isSafeInteger(sequence[0]!.seq) || sequence[0]!.seq < high)
     throw new Error("Invalid V2 event sequence watermark");
   validateBlobs(s);
+  assertHistoryMessages(s.tables.session_message!, true);
   return s;
 }
 function validateBlobs(s: Shard): void {
@@ -342,7 +360,11 @@ export async function exportV2(
   options: SelectOptions,
   _reporter: Reporter,
 ): Promise<ExportResult> {
-  const db = await openDatabase(file, { readOnly: true });
+  if (options.offlineConfirmed) await assertOfflineV2(file, true);
+  const db = await openDatabase(file, {
+    readOnly: true,
+    immutable: options.offlineConfirmed === true,
+  });
   try {
     db.exec("BEGIN");
     assertSchema(db);
@@ -356,7 +378,10 @@ export async function exportV2(
       conflicts: [],
     };
     // Validate the whole export before writing a single shard.
-    const plan = ids.map((id) => ({ id, data: snapshot(db, id, options.pathMappings) }));
+    const plan = ids.map((id) => ({
+      id,
+      data: snapshot(db, id, options.pathMappings, options.offlineConfirmed),
+    }));
     for (const item of plan) {
       const dest = shardPath(repo, item.id);
       if (fs.existsSync(dest)) {
@@ -505,7 +530,7 @@ export async function importV2(
       const id = item.shard.session.id;
       const remoteHash = hash(item.shard);
       if (rows(db, "SELECT 1 FROM session_v2 WHERE id=?", id).length) {
-        const local = snapshot(db, id, options.pathMappings ?? []);
+        const local = snapshot(db, id, options.pathMappings ?? [], true);
         const localHash = hash(local);
         if (localHash === remoteHash) {
           result.skippedOlder++;

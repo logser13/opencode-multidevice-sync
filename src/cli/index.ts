@@ -148,7 +148,7 @@ async function runSync(action: "push" | "pull", args: Args): Promise<void> {
   try {
     const result = await withSyncLock(roots.config, { waitMs: LOCK_WAIT_MS }, () =>
       action === "push"
-        ? push({ force, dryRun, reporter, roots })
+        ? push({ force, dryRun, reporter, roots, offlineConfirmed: args.flags.has("offline") })
         : pull({ force, dryRun, reporter, roots, offlineConfirmed: args.flags.has("offline") }),
     );
     spinner.stop();
@@ -378,7 +378,7 @@ async function runDoctor(args: Args): Promise<void> {
   }
   const report = {
     package: "opencode-multidevice-sync",
-    version: "0.2.0-v2.0",
+    version: "0.2.0-v2.1",
     machine: settings.machineAlias ?? "auto",
     database: health,
     sessionSync: settings.sessions.enabled,
@@ -508,7 +508,10 @@ function runHelp(): void {
   command("link <owner/repo>", "Use an existing sync repository");
 
   heading("Sync");
-  command("push", "Send this machine's configuration");
+  command(
+    "push [--offline]",
+    "Send configuration; interrupted V2 histories require stopped OpenCode",
+  );
   command("pull [--offline]", "Apply shared configuration; V2 sessions require stopped OpenCode");
   command("status", "Show what is in sync and what is not");
 
@@ -550,7 +553,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.flags.has("version")) {
-    console.log("0.2.0-v2.0");
+    console.log("0.2.0-v2.1");
     return;
   }
   switch (args.command) {

@@ -82,6 +82,8 @@ export interface SessionShard {
 }
 
 export interface SelectOptions extends SessionSettings {
+  /** Allow interrupted assistant history only after validating a closed V2 database. */
+  offlineConfirmed?: boolean;
   now?: number;
 }
 

@@ -17,6 +17,7 @@ import {
 } from "../src/core/sessions.js";
 import { DEFAULT_SETTINGS } from "../src/core/settings.js";
 import { openDatabase } from "../src/core/sqlite.js";
+import { push } from "../src/core/sync.js";
 
 const schema = fs.readFileSync(
   fileURLToPath(new URL("./fixtures/opencode-2.0.29.sql", import.meta.url)),
@@ -126,6 +127,168 @@ async function instructions(file: string) {
 }
 
 describe("V2 sessions", () => {
+  async function interrupted() {
+    const db = await openDatabase(a);
+    const data = {
+      time: { created: 2 },
+      content: [
+        { type: "reasoning", text: "Preserve partial reasoning" },
+        {
+          type: "tool",
+          state: {
+            status: "completed",
+            input: { path: "C:/app/file" },
+            content: "Original result",
+          },
+        },
+      ],
+    };
+    db.prepare(
+      "INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)",
+    ).run("msg_interrupted", "ses_one", "assistant", 3, 2, 2, JSON.stringify(data));
+    db.prepare("UPDATE event_sequence SET seq=4").run();
+    db.close();
+    return data;
+  }
+  it("preserves an unfinished historical assistant on an explicitly offline round trip", async () => {
+    const data = await interrupted();
+    await expect(exportSessions(a, repo, select, silentReporter)).rejects.toThrow(
+      /running|settled/i,
+    );
+    const first = await exportSessions(
+      a,
+      repo,
+      { ...select, offlineConfirmed: true },
+      silentReporter,
+    );
+    await acknowledgeExport(a, repo, [], first.exportedHashes);
+    expect((await importSessions(b, repo, silentReporter, offline)).imported).toBe(1);
+    const db = await openDatabase(b);
+    expect(
+      JSON.parse(
+        db.prepare("SELECT data FROM session_message WHERE id='msg_interrupted'").all()[0].data,
+      ),
+    ).toEqual(data);
+    db.prepare("UPDATE session_v2 SET title='Continued on B'").run();
+    db.close();
+    const second = await exportSessions(
+      b,
+      repo,
+      { ...select, offlineConfirmed: true },
+      silentReporter,
+    );
+    await acknowledgeExport(b, repo, [], second.exportedHashes);
+    expect((await importSessions(a, repo, silentReporter, offline)).imported).toBe(1);
+    const returned = await openDatabase(a, { readOnly: true });
+    expect(
+      JSON.parse(
+        returned.prepare("SELECT data FROM session_message WHERE id='msg_interrupted'").all()[0]
+          .data,
+      ),
+    ).toEqual(data);
+    expect(returned.prepare("SELECT count(*) AS n FROM session_message").all()[0].n).toBe(2);
+    returned.close();
+  });
+  it.each(["pending", "running", "unknown"])(
+    "refuses unfinished embedded tool state %s even offline",
+    async (status) => {
+      const data = await interrupted();
+      data.content[1]!.state!.status = status;
+      const db = await openDatabase(a);
+      db.prepare("UPDATE session_message SET data=? WHERE id='msg_interrupted'").run(
+        JSON.stringify(data),
+      );
+      db.close();
+      await expect(
+        exportSessions(a, repo, { ...select, offlineConfirmed: true }, silentReporter),
+      ).rejects.toThrow(/tool|running|settled/i);
+    },
+  );
+  it("refuses an execution owner even in an offline interrupted snapshot", async () => {
+    await interrupted();
+    const db = await openDatabase(a);
+    db.prepare("UPDATE event_sequence SET owner_id='owner_live'").run();
+    db.close();
+    await expect(
+      exportSessions(a, repo, { ...select, offlineConfirmed: true }, silentReporter),
+    ).rejects.toThrow(/owner|execution|running/i);
+  });
+  it("refuses offline export when a database journal has pending writes", async () => {
+    await interrupted();
+    fs.writeFileSync(a + "-wal", "pending writes");
+    await expect(
+      exportSessions(a, repo, { ...select, offlineConfirmed: true }, silentReporter),
+    ).rejects.toThrow(/wal|journal/i);
+    expect(fs.existsSync(shard())).toBe(false);
+  });
+  it("rejects an incoming unfinished tool without importing any history", async () => {
+    await interrupted();
+    await exportSessions(a, repo, { ...select, offlineConfirmed: true }, silentReporter);
+    tamper((s) => {
+      const partial = s.tables.session_message.find((r: any) => r.id === "msg_interrupted");
+      JSON.parse(partial.data);
+      const data = JSON.parse(partial.data);
+      data.content[1].state.status = "running";
+      partial.data = JSON.stringify(data);
+    });
+    const result = await importSessions(b, repo, silentReporter, offline);
+    expect(result.imported).toBe(0);
+    expect(result.failed[0]?.reason).toMatch(/tool|running/i);
+    expect(await listSessions(b, 10)).toEqual([]);
+  });
+  it("keeps refusing a native-style completion timestamp rewrite of archived history", async () => {
+    const data = await interrupted();
+    const exported = await exportSessions(
+      a,
+      repo,
+      { ...select, offlineConfirmed: true },
+      silentReporter,
+    );
+    await acknowledgeExport(a, repo, [], exported.exportedHashes);
+    await importSessions(b, repo, silentReporter, offline);
+    const original = fs.readFileSync(shard());
+    const db = await openDatabase(b);
+    db.prepare("UPDATE session_message SET time_updated=3,data=? WHERE id='msg_interrupted'").run(
+      JSON.stringify({ ...data, time: { created: 2, completed: 3 } }),
+    );
+    db.close();
+    await expect(
+      exportSessions(b, repo, { ...select, offlineConfirmed: true }, silentReporter),
+    ).rejects.toThrow(/rewrite|discard/i);
+    expect(fs.readFileSync(shard())).toEqual(original);
+  });
+  it("preflights the original WAL before making an offline push preview copy", async () => {
+    const roots = {
+      config: path.join(root, "config"),
+      data: path.join(root, "data"),
+      state: path.join(root, "state"),
+      cache: path.join(root, "cache"),
+      agents: path.join(root, "agents"),
+      database: a,
+    };
+    for (const dir of [roots.config, roots.data, roots.state, roots.cache, roots.agents])
+      fs.mkdirSync(dir);
+    const db = await openDatabase(a);
+    db.exec("PRAGMA journal_mode=WAL");
+    db.prepare("UPDATE session_v2 SET title='Live edit'").run();
+    try {
+      await expect(
+        push({
+          roots,
+          settings: {
+            ...DEFAULT_SETTINGS,
+            repo: { url: path.join(root, "remote.git"), branch: "main" },
+            sessions: select,
+          },
+          offlineConfirmed: true,
+          dryRun: true,
+        }),
+      ).rejects.toThrow(/wal|journal/i);
+      expect(fs.existsSync(path.join(roots.config, ".git"))).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
   it("acknowledges the exported snapshot when live state advances or excluded history is active", async () => {
     await addSession(a, "ses_excluded");
     const first = await exportSessions(a, repo, select, silentReporter);

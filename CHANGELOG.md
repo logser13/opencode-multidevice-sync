@@ -1,5 +1,12 @@
 # Multidevice Sync changelog
 
+## 0.2.0-v2.1 - 2026-10-15 interrupted history preview
+
+- Added explicit offline V2 export for interrupted assistant histories without changing their content or completion state. Original journal checks also run before push previews; live/default exports remain strict.
+- Retained execution/queue/workspace and immutable-history guards; reject nonterminal or unknown embedded tools on export and import.
+- Added interrupted-history round-trip, native timestamp-rewrite refusal and original-WAL preview tests, plus an isolated native acceptance driver with fork continuation for an incomplete tail.
+- No working installation, database, original source checkout or private repository is migrated by this preview.
+
 ## 0.2.0-v2.0 - 2026-10-15 isolated V2 preview
 
 - Added strict versioned V2 session transport pinned to OpenCode 2.0.29, with events, sequence watermarks, instruction blobs, Windows project mapping and non-destructive whole-batch imports.
